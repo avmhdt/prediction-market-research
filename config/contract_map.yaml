@@ -1,0 +1,12 @@
+# Manual cross-venue map (FR-14). Only pairs with status "confirmed" enter the arb scanner,
+# the mismatch catalogue and the cross-venue comparison. Automatic scores never confirm a pair.
+# Entry format (SPEC section 10):
+#   - a: {venue: kalshi, market_id: "..."}
+#     b: {venue: polymarket, market_id: "0x..."}
+#     orientation: 1               # +1 YES_a == YES_b; -1 YES_a == NO_b
+#     status: confirmed            # confirmed | rejected
+#     material_diffs: [deadline]   # hand-confirmed diff types
+#     note: "..."
+#     reviewed_by: avmhdt
+#     reviewed_at: 2026-11-12
+pairs: []

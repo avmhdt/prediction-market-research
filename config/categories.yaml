@@ -1,0 +1,9 @@
+# Project category taxonomy (D-08). Venue categories and tags map to these; unknown -> other.
+# The venue-specific mapping is filled in M2 from the categories actually seen in the data.
+taxonomy: [politics, economics, finance, crypto, sports, weather-climate, science-tech, culture, other]
+default: other
+mapping:
+  kalshi: {}
+  polymarket: {}
+  manifold: {}
+  metaculus: {}

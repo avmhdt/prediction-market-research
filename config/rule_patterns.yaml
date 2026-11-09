@@ -1,0 +1,8 @@
+# Regexes for resolution-rule field extraction (FR-15); written in M3.
+source: []
+deadline: []
+timezone: []
+threshold: []
+void_handling: []
+early_close: []
+multi_outcome_scope: []

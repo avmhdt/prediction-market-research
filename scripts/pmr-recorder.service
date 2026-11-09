@@ -1,0 +1,20 @@
+# systemd unit for the book recorder (P-02, FR-23). Installed and enabled in M4, not before.
+# Copy to /etc/systemd/system/pmr-recorder.service inside WSL2 Ubuntu, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now pmr-recorder
+[Unit]
+Description=prediction-market-research book recorder (paper only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/mnt/d/trading-strategy-brainstorm/prediction-market-research
+Environment=DATA_ROOT=%h/data/prediction-market-research
+ExecStart=/usr/bin/env uv run --frozen pmr record books
+Nice=10
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
