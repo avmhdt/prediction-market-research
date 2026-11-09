@@ -15,7 +15,7 @@ import os
 import re
 import sys
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 
 import yaml
@@ -30,6 +30,10 @@ DEFAULT_USER_AGENT = (
 
 Venue = Literal["kalshi", "polymarket", "manifold", "metaculus"]
 VENUES: tuple[Venue, ...] = ("kalshi", "polymarket", "manifold", "metaculus")
+
+
+def _on_c_drive(path: Path) -> bool:
+    return PureWindowsPath(str(path)).drive.upper() == "C:"
 
 
 class SettingsError(RuntimeError):
@@ -91,10 +95,13 @@ class Settings(BaseSettings):
                 chosen = None
             else:
                 chosen = self.data_root
-        path = Path(os.path.expanduser(chosen)) if chosen else base / "data"
-        if not path.is_absolute():
-            path = base / path
-        if plat == "win32" and path.drive.upper() == "C:":
+        if chosen:
+            path = Path(os.path.expanduser(chosen))
+            if not path.is_absolute():
+                path = base / path
+        else:
+            path = base / "data"
+        if plat == "win32" and _on_c_drive(path):
             raise SettingsError(f"data directory {path} is on C:, which is not allowed")
         return path
 
@@ -102,7 +109,7 @@ class Settings(BaseSettings):
         """The single DuckDB warehouse file (``<data dir>/warehouse.duckdb`` by default)."""
         if self.pmr_warehouse_path:
             path = Path(os.path.expanduser(self.pmr_warehouse_path))
-            if (platform or sys.platform) == "win32" and path.drive.upper() == "C:":
+            if (platform or sys.platform) == "win32" and _on_c_drive(path):
                 raise SettingsError(f"warehouse path {path} is on C:, which is not allowed")
             return path
         return self.data_dir(platform=platform, cwd=cwd) / "warehouse.duckdb"
