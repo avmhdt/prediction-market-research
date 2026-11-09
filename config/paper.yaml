@@ -1,0 +1,8 @@
+# Book recorder and paper trader (SPEC section 10; used from M4). Paper only: no order is ever sent.
+poll_interval_s: 30
+markets: {from_pairs: confirmed, extra: [], max_markets: 200}
+strategies:
+  arb_monitor: {enabled: true, max_notional_per_trade: 100, min_net_edge: 0.005}
+  mm_quotes: {enabled: true, q_max: 100, capital_max: 1000}
+  flb_tilt: {enabled: true, buckets: [[0.90, 0.97]], notional_per_market: 50}
+min_days: 28

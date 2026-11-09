@@ -40,3 +40,13 @@ Thumbs.db
 
 # Local build spec (kept out of the public repo)
 SPEC.html
+
+# Added in M1 (SPEC section 3)
+*.duckdb
+*.pem
+*.key
+*.jsonl
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

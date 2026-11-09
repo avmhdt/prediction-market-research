@@ -1,0 +1,42 @@
+# Effective-dated fee schedules (FR-16). Coefficients, rounding and dates are copied only from
+# the official venue documents, with URL and retrieval date. Filled and checked in M3
+# (`pmr fees check` fails while any REQUIRED field is null).
+schedules:
+  - schedule_id: kalshi-general-YYYYMMDD
+    venue: kalshi
+    scope: {type: default}
+    formula: coef_x_c_p_1mp            # fee = coef x C x P x (1 - P)
+    taker_coef: null                   # REQUIRED: from https://kalshi.com/docs/kalshi-fee-schedule.pdf
+    maker_coef: 0.0                    # maker fees only on listed series (next entry)
+    rounding: null                     # REQUIRED: as printed in the schedule
+    effective_from: null               # REQUIRED: effective date printed on the schedule
+    effective_to: null
+    source_url: https://kalshi.com/docs/kalshi-fee-schedule.pdf
+    retrieved_on: null
+    worked_examples:                   # copied from the schedule; used by tests
+      - {price: null, contracts: null, liquidity: taker, fee_usd: null}
+  - schedule_id: kalshi-maker-series-YYYYMMDD
+    venue: kalshi
+    scope: {type: series, series: []}  # from https://kalshi.com/fee-schedule
+    formula: coef_x_c_p_1mp
+    taker_coef: null
+    maker_coef: null
+    rounding: null
+    effective_from: null
+    source_url: https://kalshi.com/fee-schedule
+    retrieved_on: null
+  - schedule_id: polymarket-YYYYMMDD
+    venue: polymarket
+    scope: {type: category, rates: {}} # category -> rate, from https://docs.polymarket.com (fees page)
+    formula: coef_x_c_p_1mp            # verify the exact formula on the fees page
+    maker_coef: 0.0                    # verify maker fee / rebate treatment
+    rounding: null
+    effective_from: null
+    source_url: https://docs.polymarket.com/trading/fees
+    retrieved_on: null
+  - schedule_id: manifold-none
+    venue: manifold
+    scope: {type: default}
+    formula: none                      # play money; document any API fee in mana
+    effective_from: 2020-01-01
+    source_url: https://docs.manifold.markets/api

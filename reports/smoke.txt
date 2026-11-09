@@ -1,0 +1,17 @@
+pmr smoke  2026-11-09T23:50:34Z  OWNER_COUNTRY=KY
+
+source             endpoint                         req  status         ms   clock_s  record_id  note
+kalshi             GET /markets                     yes  200           524     +0.43  KXNCAAWBTOTAL-26NOV09USAUCF-170  
+kalshi             GET /markets/{ticker}/orderbook  yes  200           158     +0.59  KXNCAAWBTOTAL-26NOV09USAUCF-170  0 price levels
+kalshi             GET /markets/trades              yes  200           160     +0.79  0726c859-1af1-8288-4354-67beca6fcfb2  
+kalshi             GET /historical/cutoff           yes  200           158     +1.01  cutoff  market_positions_last_updated_ts=2026-09-10T00:00:00Z, market_settled_ts=2026-09-10T00:00:00Z, orders_updated_ts=2026-10
+polymarket-gamma   GET /markets                     yes  200           409    +27.42  0x87b847e161ea1a750e1f094223a644ca374e4d97a7b9d0397974a2f3c67e547d  5 markets
+polymarket-clob    GET /book                        yes  200          3564     +0.98  130221574932...  66 price levels
+polymarket-data    GET /trades                      yes  200          3522     +0.50  0xe37bf188c5a2...  
+polymarket         GET /api/geoblock                no   200           231     +0.73  geoblock  blocked=True country=BR
+manifold           GET /markets                     yes  200          3691     +0.42  sshROyhdlU  
+metaculus          GET /posts/                      no   skipped         -         -    METACULUS_API_TOKEN not set (P-06)
+fred               GET fredgraph.csv?id=DTB3        yes  200            96     +0.52  2026-11-06  header=observation_date,DTB3
+
+clock_s = local receipt time minus the server Date header (1 s resolution; DQ-01 flags offsets over 2 s).
+required probes failed: 0
