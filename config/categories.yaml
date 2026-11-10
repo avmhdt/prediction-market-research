@@ -1,9 +1,52 @@
-# Project category taxonomy (D-08). Venue categories and tags map to these; unknown -> other.
-# The venue-specific mapping is filled in M2 from the categories actually seen in the data.
+# Project category taxonomy (D-08). The owner may edit this file.
+#
+# Each market's raw labels (Kalshi series category, Polymarket tags and category, Manifold
+# group slugs, Metaculus categories) are tried in order. For each label, an exact match in
+# `exact` wins; otherwise the first taxonomy entry in `keywords` whose word list has a word
+# contained in the lower-cased label wins. A market with no match is `other` (DQ-15: the share
+# of `other` among real-money resolved markets must stay below 15%).
 taxonomy: [politics, economics, finance, crypto, sports, weather-climate, science-tech, culture, other]
 default: other
-mapping:
-  kalshi: {}
-  polymarket: {}
+
+exact:
+  # Kalshi series categories (GET /series)
+  kalshi:
+    Politics: politics
+    Elections: politics
+    World: politics
+    Economics: economics
+    Financials: finance
+    Companies: finance
+    Crypto: crypto
+    Sports: sports
+    Climate and Weather: weather-climate
+    Science and Technology: science-tech
+    Health: science-tech
+    Entertainment: culture
+    Social: culture
+    Mentions: culture
+    Transportation: other
+  polymarket:
+    US-current-affairs: politics
+    Pop-Culture: culture
+    Pop Culture: culture
+    Coronavirus: science-tech
+    NBA Playoffs: sports
+    Olympics: sports
+    Chess: sports
+    Poker: sports
+    Art: culture
+    Business: finance
   manifold: {}
   metaculus: {}
+
+# Order matters: earlier entries win when a label matches several.
+keywords:
+  crypto: [crypto, bitcoin, btc, ethereum, eth, solana, xrp, doge, memecoin, nft, stablecoin, airdrop, token, defi, binance, coinbase]
+  sports: [sport, nba, nfl, mlb, nhl, ncaa, soccer, football, basketball, baseball, hockey, tennis, golf, ufc, mma, boxing, f1, formula 1, racing, cricket, rugby, olympic, premier league, champions league, la liga, serie a, bundesliga, world cup, esports, epl, wnba, cfb, mls, nascar, cycling, chess, darts, snooker]
+  weather-climate: [weather, climate, temperature, hurricane, rain, snow, storm, heat, earthquake, natural disaster, wildfire, tornado]
+  economics: [economy, economics, fed, fomc, interest rate, inflation, cpi, gdp, jobs, unemployment, payroll, recession, tariff, treasury, rates, macro, housing, gas price]
+  finance: [finance, financial, stock, stocks, equities, s&p, nasdaq, dow, earnings, ipo, company, companies, business, commodities, oil, gold, forex, fx, bonds, markets]
+  politics: [politic, election, elections, president, presidential, congress, senate, house, governor, mayor, trump, biden, harris, democrat, republican, geopolitic, war, ukraine, russia, israel, gaza, iran, china, middle east, nato, world, global, government, supreme court, scotus, policy, parliament, prime minister, primaries, vote, ballot, cabinet, white house, foreign policy, courts, legal, law]
+  science-tech: [science, tech, technology, ai, artificial intelligence, openai, space, spacex, nasa, health, covid, coronavirus, pandemic, disease, medicine, biology, physics, math, software, apple, google, microsoft, tesla, elon]
+  culture: [culture, pop culture, entertainment, movie, movies, film, box office, oscars, grammys, emmys, music, album, celebrity, celebrities, tv, television, award, awards, youtube, twitter, x.com, tweet, mentions, social media, gaming, video games, books, fashion, religion, pope]

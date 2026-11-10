@@ -143,6 +143,11 @@ class HttpClient:
             follow_redirects=False,
         )
 
+    def allow_host(self, host: str) -> None:
+        """Add a read-only data host (for example a configured subgraph) to the guard."""
+        if host and host not in self._extra_hosts:
+            self._extra_hosts = (*self._extra_hosts, host)
+
     async def __aenter__(self) -> HttpClient:
         return self
 

@@ -18,6 +18,11 @@ dependencies = [
     "pydantic-settings>=2.3",
     "pyyaml>=6.0",
     "structlog>=24.1",
+    "polars>=1.10",
+    "duckdb>=1.1",
+    "pyarrow>=17",
+    "zstandard>=0.22",
+    "numpy>=2.0",
 ]
 
 [project.scripts]
@@ -62,7 +67,7 @@ files = ["src/pmr"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --basetemp=.pytest_tmp"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
