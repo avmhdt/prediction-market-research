@@ -96,12 +96,16 @@ async def ingest_kalshi(
         elif what in ("trades", "candles", "books"):
             m = window_markets(data_dir, "kalshi", since, until)
             if what == "trades":
+                # Kalshi volume is in contracts; below 100 contracts the notional cannot reach
+                # USD 100, so the market can never pass DQ-07 (decisions A-28).
+                m = m.filter(pl.col("volume").fill_null(0) >= MIN_NOTIONAL_FOR_TRADES)
                 rows = [
                     (r["symbol"], (r["open_ts"] or 0) // 10**9, (r["close_ts"] or 0) // 10**9)
                     for r in m.iter_rows(named=True)
                 ]
                 await k.trades(rows, stats)
             elif what == "candles":
+                m = m.filter(pl.col("volume").fill_null(0) > 0)
                 rows5 = [
                     (
                         r["series_id"] or "",

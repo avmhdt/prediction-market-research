@@ -4,7 +4,7 @@ study_window: {from: 2023-01-01, to: latest}          # D-01
 venues:
   kalshi:
     base_url: ${KALSHI_API_BASE}
-    rate_limit_rps: 5            # conservative until confirmed in docs/venue_notes.md
+    rate_limit_rps: 3            # below the paper service's 4 req/s; unauthenticated limits are undocumented
     settlement_lag_hours: 24     # verify; used by lockup
     storage_allowed: true        # owner accepted the risk on 2026-11-09 (docs/decisions.md)
   polymarket:
