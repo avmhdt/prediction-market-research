@@ -533,8 +533,9 @@ class Recorder:
             return False
         stop = self.dir / "STOP"
         if not stop.exists():
-            stop.write_text(f"paper period ended at {self.pcfg.period.end}
-", encoding="utf-8")
+            stop.write_text(
+                f"paper period ended at {self.pcfg.period.end}" + chr(10), encoding="utf-8"
+            )
             log.info("period_over", end=self.pcfg.period.end)
         return True
 
