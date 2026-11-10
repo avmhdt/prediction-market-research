@@ -23,7 +23,6 @@ from pmr.collectors.metaculus import MetaculusCollector
 from pmr.collectors.polymarket_clob import ClobCollector
 from pmr.collectors.polymarket_data import DataApiCollector
 from pmr.collectors.polymarket_gamma import GammaCollector
-from pmr.collectors.polymarket_onchain import OnchainCollector, reconcile
 from pmr.collectors.raw import iter_parts, read_part
 from pmr.http.client import HttpClient
 from pmr.http.ratelimit import RateLimiterRegistry
@@ -182,7 +181,7 @@ async def test_kill_and_resume_has_no_gaps_or_duplicates(
 
 
 @respx.mock
-async def test_books_and_onchain_reconciliation(tmp_path: Path, cfg: PmrConfig) -> None:
+async def test_clob_books_to_bbo(tmp_path: Path, cfg: PmrConfig, settings: Settings) -> None:
     respx.get(f"{synth.CLOB}/book").mock(
         return_value=httpx.Response(
             200,
@@ -194,15 +193,8 @@ async def test_books_and_onchain_reconciliation(tmp_path: Path, cfg: PmrConfig) 
             },
         )
     )
-    s = Settings(_env_file=None, polymarket_subgraph_url="https://sub.example.org/gn")  # type: ignore[call-arg]
-    fills = [{"id": "1", "transactionHash": "0xtx0_0", "timestamp": str(synth.T0)}]
-    sub = respx.get("https://sub.example.org/gn").mock(
-        return_value=httpx.Response(200, json={"data": {"orderFilledEvents": fills}})
-    )
-    async with context(tmp_path, cfg, s) as ctx:
+    async with context(tmp_path, cfg, settings) as ctx:
         await ClobCollector(ctx).books(["1000111", "1000111"], IngestStats())
-        await OnchainCollector(ctx).fills(["1000111"], IngestStats())
-    assert "query" in str(sub.calls.last.request.url)
     normalize(tmp_path, cats())
     con = wh(tmp_path)
     bbo = con.execute(
@@ -210,20 +202,6 @@ async def test_books_and_onchain_reconciliation(tmp_path: Path, cfg: PmrConfig) 
     ).fetchall()
     assert bbo == [(1, 0.40, 100.0, 0.45, 50.0), (2, 0.40, 100.0, 0.45, 50.0)]
     con.close()
-
-    ok = reconcile("m", [{"tx_hash": "0xA", "qty": 10}], [{"tx_hash": "0xa", "qty": 10.04}])
-    assert ok.passed and ok.match_rate == 1.0
-    bad = reconcile("m", [{"tx_hash": "0xA", "qty": 10}, {"tx_hash": "0xB", "qty": 1}], [])
-    assert not bad.passed and bad.size_diff == 1.0
-    assert reconcile("m", [], []).passed
-
-
-async def test_onchain_needs_a_configured_endpoint(
-    tmp_path: Path, cfg: PmrConfig, settings: Settings
-) -> None:
-    async with context(tmp_path, cfg, settings) as ctx:
-        with pytest.raises(CollectorError, match="SUBGRAPH"):
-            OnchainCollector(ctx)
 
 
 # --------------------------------------------------------------------------------- Kalshi

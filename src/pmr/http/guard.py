@@ -56,6 +56,15 @@ _FORBIDDEN_SEGMENT = re.compile(
 _FORBIDDEN_PREFIX = re.compile(r"^(portfolio|order)[-_]", re.IGNORECASE)
 
 
+RPC_HOSTS: frozenset[str] = frozenset({"gateway.tenderly.co", "polygon.drpc.org"})
+"""Public Polygon JSON-RPC gateways (owner decision 2026-11-10: on-chain history)."""
+
+RPC_READ_METHODS: frozenset[str] = frozenset(
+    {"eth_getLogs", "eth_blockNumber", "eth_getBlockByNumber", "eth_chainId", "eth_call"}
+)
+"""The only JSON-RPC methods ever sent; nothing that signs or sends a transaction."""
+
+
 class GuardError(PermissionError):
     """Raised when a request would leave the read-only, paper-only envelope."""
 
@@ -88,3 +97,25 @@ def check_request(method: str, url: str, *, extra_hosts: Iterable[str] = ()) -> 
     for seg in _segments(path):
         if _FORBIDDEN_SEGMENT.match(seg) or _FORBIDDEN_PREFIX.match(seg):
             raise GuardError(f"path {path!r} names a trading or account endpoint")
+
+
+def check_jsonrpc(url: str, payload: object) -> None:
+    """Raise unless ``payload`` is one read-only JSON-RPC call to an allowed Polygon gateway.
+
+    This is the single exception to the GET-only rule (owner decision 2026-11-10): POST is
+    allowed only to :data:`RPC_HOSTS`, only for a single (non-batch) request, and only for
+    :data:`RPC_READ_METHODS`. ``eth_call`` may not carry a ``from`` or value field.
+    """
+    parts = urlsplit(url)
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in RPC_HOSTS:
+        raise GuardError(f"JSON-RPC host is not allowed: {url!r}")
+    if not isinstance(payload, dict):
+        raise GuardError("only single JSON-RPC requests are allowed (no batches)")
+    method = payload.get("method")
+    if method not in RPC_READ_METHODS:
+        raise GuardError(f"JSON-RPC method {method!r} is not a read method on the allowlist")
+    if method == "eth_call":
+        params = payload.get("params") or []
+        call = params[0] if params and isinstance(params[0], dict) else {}
+        if set(call) - {"to", "data"}:
+            raise GuardError("eth_call may carry only 'to' and 'data'")
