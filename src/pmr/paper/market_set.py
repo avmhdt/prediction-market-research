@@ -238,7 +238,7 @@ class MarketSet:
             for m in cands:
                 if have >= quotas.get(venue, 0) or len(self.members) >= max_markets:
                     break
-                if m.key in self.members:
+                if m.key in self.members or m.close_ts <= now_ns:
                     continue
                 self.members[m.key] = m
                 self.history.append({"ts": now_ns, "event": "added", "key": m.key})

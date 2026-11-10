@@ -533,6 +533,7 @@ class Recorder:
             return False
         stop = self.dir / "STOP"
         if not stop.exists():
+            self.dir.mkdir(parents=True, exist_ok=True)
             stop.write_text(
                 f"paper period ended at {self.pcfg.period.end}" + chr(10), encoding="utf-8"
             )
@@ -599,14 +600,16 @@ def status(data_dir: Path, pcfg: PaperConfig, now_ns: int | None = None) -> dict
     uptime: dict[str, float] = {}
     for venue in ("kalshi", "polymarket"):
         down = 0
+        covered = 0
         for g in gaps:
             if g["venue"] != venue:
                 continue
             a, b = max(int(g["start_ts"]), start), min(int(g["end_ts"]), now)
             down += max(0, b - a)
-        last = (hb.get("last_success_ns") or {}).get(venue)
-        if last and now - int(last) > 3 * pcfg.poll_interval_s * NS:
-            down += now - max(int(last), start)  # an open gap
+            covered = max(covered, int(g["end_ts"]))
+        last = max(int((hb.get("last_success_ns") or {}).get(venue) or 0), covered)
+        if last and now - last > 3 * pcfg.poll_interval_s * NS:
+            down += now - max(last, start)  # an open gap not yet in gaps.csv
         uptime[venue] = round(100.0 * (1 - down / span), 3)
     return {
         "since": datetime.fromtimestamp(start / NS, tz=UTC).isoformat(),
