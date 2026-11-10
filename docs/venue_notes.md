@@ -33,7 +33,7 @@ this is a reading for the owner, not legal advice.
 
 | Source | BR status for this project's use (public, read-only, no account) |
 |---|---|
-| Polymarket | **Unclear; collection paused pending the owner.** The ToS (effective 2026-08-11) applies restrictions to people "located in" a Restricted Jurisdiction, not only residents, and such users "are only permitted to use the Content Features" (informational features). It does not say whether unauthenticated API reads count. The docs geoblock page lists BR as close-only (no new positions); the help centre (<https://help.polymarket.com/en/articles/13364163-geographic-restrictions>, updated 2026-10-29) lists BR among countries "completely restricted from accessing Polymarket", while saying some restricted users "can view markets and data". Public reads return 200 from here. |
+| Polymarket | **Owner decision of 2026-11-10: history from public Polygon on-chain data only; live public reads only for the paper run's order books.** The ToS (effective 2026-08-11) applies restrictions to people "located in" a Restricted Jurisdiction, not only residents, and such users "are only permitted to use the Content Features" (informational features). It does not say whether unauthenticated API reads count. The docs geoblock page lists BR as close-only (no new positions); the help centre (<https://help.polymarket.com/en/articles/13364163-geographic-restrictions>, updated 2026-10-29) lists BR among countries "completely restricted from accessing Polymarket", while saying some restricted users "can view markets and data". Public reads return 200 from here. |
 | Kalshi | Reading is not restricted by location. Brazil is not named in the restricted lists that could be read (an older Member Agreement copy; the Klear member agreement of 2026-06-22); their catch-all covers places where *trading* is illegal, which now likely includes Brazil. The Developer Agreement and Data Terms have no location clause; the storage restriction above is unchanged. The current Member Agreement could not be read (HTTP 429). |
 | Manifold | No BR restriction; play money; the public API is allowed. Prize-drawing exclusions do not name Brazil and do not concern data access. |
 | Metaculus | No BR-specific clause found (the terms page answered 403 to automated reads). |
@@ -101,7 +101,9 @@ Sources: <https://docs.kalshi.com/getting_started/api_environments>,
   Whether KY is restricted could not be read first-hand (the agreement PDF could not be
   extracted, and kalshi.com answered 429 to automated reads): **UNVERIFIED**. No account is
   needed for this project.
-- **Terms on data use: needs the owner's decision before M2.**
+- **Terms on data use: owner decision of 2026-11-09 (docs/decisions.md).** The owner accepted
+  the risk below. Only public read-only endpoints are used; the archive stays local and is never
+  redistributed; published aggregates name Kalshi (KalshiEx LLC, kalshi.com) as the source.
   - Kalshi Developer Agreement v1.1 (<https://assets.kalshi.com/Kalshi-Developer-Agreement.pdf>,
     linked from <https://kalshi.com/developer-agreement>): section 1 says using the API accepts
     the agreement. Section 3 limits API use to "facilitating a members own trading on the

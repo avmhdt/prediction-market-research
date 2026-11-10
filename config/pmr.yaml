@@ -6,7 +6,7 @@ venues:
     base_url: ${KALSHI_API_BASE}
     rate_limit_rps: 5            # conservative until confirmed in docs/venue_notes.md
     settlement_lag_hours: 24     # verify; used by lockup
-    storage_allowed: false       # stays false until the owner rules on Kalshi's data terms
+    storage_allowed: true        # owner accepted the risk on 2026-11-09 (docs/decisions.md)
   polymarket:
     gamma_url: https://gamma-api.polymarket.com
     clob_url: https://clob.polymarket.com

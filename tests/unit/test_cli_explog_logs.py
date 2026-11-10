@@ -88,8 +88,13 @@ def test_logs_redact_secrets(capsys: pytest.CaptureFixture[str]) -> None:
     assert "hidden" not in capsys.readouterr().err
 
 
-def test_ingest_commands_refuse_without_permission_or_token() -> None:
-    r = CliRunner().invoke(cli.app, ["ingest", "kalshi", "--what", "markets"])
+def test_ingest_commands_refuse_without_permission_or_token(tmp_path: Path) -> None:
+    text = (REPO / "config" / "pmr.yaml").read_text(encoding="utf-8")
+    cfg = tmp_path / "pmr.yaml"
+    cfg.write_text(
+        text.replace("storage_allowed: true", "storage_allowed: false"), encoding="utf-8"
+    )
+    r = CliRunner().invoke(cli.app, ["ingest", "kalshi", "--what", "markets", "--config", str(cfg)])
     assert r.exit_code == 3 and "owner's ruling" in r.output
     r = CliRunner().invoke(cli.app, ["ingest", "metaculus"])
     assert r.exit_code == 3 and "METACULUS_API_TOKEN" in r.output

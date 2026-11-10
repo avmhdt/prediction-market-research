@@ -82,7 +82,13 @@ async def test_runners_build_and_inventory(
         await run.ingest_metaculus(settings, cfg, tmp_path, since=lo, until=None)
     with pytest.raises(CollectorError, match="owner's ruling"):
         await run.ingest_kalshi(
-            settings, cfg, tmp_path, "markets", since=lo, until=None, status=None
+            settings,
+            allow_kalshi(cfg, False),
+            tmp_path,
+            "markets",
+            since=lo,
+            until=None,
+            status=None,
         )
     normalize(tmp_path, cats())
 

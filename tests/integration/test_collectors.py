@@ -40,8 +40,8 @@ async def _nosleep(_: float) -> None:
     return None
 
 
-def allow_kalshi(cfg: PmrConfig) -> PmrConfig:
-    k = cfg.venues.kalshi.model_copy(update={"storage_allowed": True})
+def allow_kalshi(cfg: PmrConfig, allowed: bool = True) -> PmrConfig:
+    k = cfg.venues.kalshi.model_copy(update={"storage_allowed": allowed})
     return cfg.model_copy(update={"venues": cfg.venues.model_copy(update={"kalshi": k})})
 
 
@@ -232,6 +232,7 @@ async def test_onchain_needs_a_configured_endpoint(
 async def test_kalshi_refuses_until_storage_is_allowed(
     tmp_path: Path, cfg: PmrConfig, settings: Settings
 ) -> None:
+    cfg = allow_kalshi(cfg, allowed=False)
     async with context(tmp_path, cfg, settings) as ctx:
         with pytest.raises(CollectorError, match="owner's ruling"):
             KalshiCollector(ctx)
