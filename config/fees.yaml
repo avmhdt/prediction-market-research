@@ -1,42 +1,83 @@
-# Effective-dated fee schedules (FR-16). Coefficients, rounding and dates are copied only from
-# the official venue documents, with URL and retrieval date. Filled and checked in M3
-# (`pmr fees check` fails while any REQUIRED field is null).
+# Effective-dated fee schedules (FR-16, DQ-11). Coefficients, rounding and dates come only from
+# official venue documents, with URL and retrieval date (spec section 16).
+#
+# M4 ships the schedules in force now, needed by the paper run (milestone order changed by the
+# owner on 2026-11-10). M3 adds the earlier schedules (CFTC filings, archived pages), the Kalshi
+# PDF's worked examples and Kalshi's maker coefficient; until then a fill outside every
+# schedule's dates raises an error (DQ-11) and Kalshi maker fees on the maker-fee series are
+# unknown (those series are left out of maker strategies).
 schedules:
-  - schedule_id: kalshi-general-YYYYMMDD
+  - schedule_id: kalshi-general-20260707
     venue: kalshi
     scope: {type: default}
-    formula: coef_x_c_p_1mp            # fee = coef x C x P x (1 - P)
-    taker_coef: null                   # REQUIRED: from https://kalshi.com/docs/kalshi-fee-schedule.pdf
-    maker_coef: 0.0                    # maker fees only on listed series (next entry)
-    rounding: null                     # REQUIRED: as printed in the schedule
-    effective_from: null               # REQUIRED: effective date printed on the schedule
-    effective_to: null
-    source_url: https://kalshi.com/docs/kalshi-fee-schedule.pdf
-    retrieved_on: null
-    worked_examples:                   # copied from the schedule; used by tests
-      - {price: null, contracts: null, liquidity: taker, fee_usd: null}
-  - schedule_id: kalshi-maker-series-YYYYMMDD
-    venue: kalshi
-    scope: {type: series, series: []}  # from https://kalshi.com/fee-schedule
+    # fee = taker_coef x series fee_multiplier x C x P x (1 - P). The series' fee_type and
+    # fee_multiplier come from the public GET /series records (quadratic, multiplier 1 for most
+    # series; 0.5 and 0 for a few). The fee page states, for "Most markets" (multiplier 1), a
+    # taker fee range of $0.07-$1.75 per 100 contracts; at P = 0.5 that is
+    # coef x 100 x 0.25 = 1.75, so coef = 0.07.
     formula: coef_x_c_p_1mp
-    taker_coef: null
-    maker_coef: null
-    rounding: null
-    effective_from: null
+    taker_coef: 0.07
+    maker_coef: 0.0          # maker fees apply only to series with fee_type *_with_maker_fees
+    maker_fee_types: [quadratic_with_maker_fees, quadratic_with_combo_maker_fees]
+    rounding: kalshi_ceil_micro_then_balance_cent
+    effective_from: 2026-07-07
+    effective_to: null
     source_url: https://kalshi.com/fee-schedule
-    retrieved_on: null
-  - schedule_id: polymarket-YYYYMMDD
+    source_effective_date: 2026-07-07   # "Fee Schedule for July 2026 - 7.7.26 Update" (PDF title)
+    retrieved_on: 2026-11-09
+    rounding_source_url: https://docs.kalshi.com/getting_started/fee_rounding
+    worked_examples:
+      # docs.kalshi.com fee rounding page: FCM-cleared fill, $0.01 balance precision.
+      # Signed revenue -0.055 with model fee 0.00363825 -> trade fee 0.003639, balance change
+      # -0.06, so trade fee plus rounding fee = 0.005.
+      - {revenue_usd: -0.055, model_fee_usd: 0.00363825, trade_fee_usd: 0.003639, total_fee_usd: 0.005}
+  - schedule_id: polymarket-20261109
     venue: polymarket
-    scope: {type: category, rates: {}} # category -> rate, from https://docs.polymarket.com (fees page)
-    formula: coef_x_c_p_1mp            # verify the exact formula on the fees page
-    maker_coef: 0.0                    # verify maker fee / rebate treatment
-    rounding: null
-    effective_from: null
+    scope:
+      type: category
+      # Polymarket category -> taker fee rate (docs fees page). Project categories map to these
+      # in pmr.fees.table.POLYMARKET_CATEGORY; a market's own fee fields override when known.
+      rates:
+        crypto: 0.07
+        sports: 0.05
+        finance: 0.04
+        politics: 0.04
+        economics: 0.05
+        culture: 0.05
+        weather: 0.05
+        other: 0.05
+        mentions: 0.04
+        tech: 0.04
+        geopolitics: 0.0
+        combos: 0.05
+    formula: coef_x_c_p_1mp            # fee = C x feeRate x p x (1 - p)
+    maker_coef: 0.0                    # "Makers are never charged fees."
+    rounding: round_5dp_min_0_00001    # rounded to 5 decimals; below 0.00001 rounds to zero
+    effective_from: 2026-11-09         # the page states no date; earlier periods arrive in M3
+    effective_to: null
     source_url: https://docs.polymarket.com/trading/fees
-    retrieved_on: null
+    source_effective_date: null
+    retrieved_on: 2026-11-10
+    worked_examples:                   # the page's table: 100 shares, USDC, shown to 2 decimals
+      - {category: crypto, price: 0.05, contracts: 100, liquidity: taker, fee_usd: 0.33}
+      - {category: crypto, price: 0.50, contracts: 100, liquidity: taker, fee_usd: 1.75}
+      - {category: crypto, price: 0.99, contracts: 100, liquidity: taker, fee_usd: 0.07}
+      - {category: sports, price: 0.10, contracts: 100, liquidity: taker, fee_usd: 0.45}
+      - {category: sports, price: 0.35, contracts: 100, liquidity: taker, fee_usd: 1.14}
+      - {category: economics, price: 0.75, contracts: 100, liquidity: taker, fee_usd: 0.94}
+      - {category: politics, price: 0.20, contracts: 100, liquidity: taker, fee_usd: 0.64}
+      - {category: politics, price: 0.45, contracts: 100, liquidity: taker, fee_usd: 0.99}
+      - {category: tech, price: 0.95, contracts: 100, liquidity: taker, fee_usd: 0.19}
+      - {category: politics, price: 0.50, contracts: 100, liquidity: maker, fee_usd: 0.0}
   - schedule_id: manifold-none
     venue: manifold
     scope: {type: default}
-    formula: none                      # play money; document any API fee in mana
+    formula: none                      # play money; no trading fee documented for API bets
+    taker_coef: 0.0
+    maker_coef: 0.0
+    rounding: none
     effective_from: 2020-01-01
+    effective_to: null
     source_url: https://docs.manifold.markets/api
+    source_effective_date: null
+    retrieved_on: 2026-11-10

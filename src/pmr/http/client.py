@@ -14,7 +14,7 @@ import asyncio
 import email.utils
 import random
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -60,9 +60,25 @@ def redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {k: (REDACTED if k.lower() in SECRET_HEADERS else v) for k, v in headers.items()}
 
 
-def redact_params(params: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Copy of query ``params`` with secret-looking keys replaced by ``***``."""
-    return {k: (REDACTED if k.lower() in SECRET_PARAMS else v) for k, v in (params or {}).items()}
+Params = Mapping[str, str | int] | Sequence[tuple[str, str | int]]
+"""Query parameters: a mapping, or (key, value) pairs when a key repeats (Kalshi ``tickers``)."""
+
+
+def redact_params(params: Params | None) -> dict[str, Any]:
+    """Copy of query ``params`` with secret-looking keys replaced by ``***``.
+
+    Repeated keys collapse into a list.
+    """
+    items = list(params.items()) if isinstance(params, Mapping) else list(params or [])
+    out: dict[str, Any] = {}
+    for k, v in items:
+        val = REDACTED if k.lower() in SECRET_PARAMS else v
+        if k in out:
+            prev = out[k]
+            out[k] = [*prev, val] if isinstance(prev, list) else [prev, val]
+        else:
+            out[k] = val
+    return out
 
 
 def parse_retry_after(value: str | None, *, now: float | None = None) -> float | None:
@@ -85,6 +101,12 @@ def backoff_delay(attempt: int, cfg: HttpConfig, rng: random.Random) -> float:
     """Full-jitter exponential backoff for retry number ``attempt`` (1-based), seconds."""
     cap = min(cfg.backoff_max_s, cfg.backoff_base_s * (2 ** (attempt - 1)))
     return rng.uniform(0.0, cap)
+
+
+def _httpx_params(params: Params | None) -> Any:
+    if not params:
+        return None
+    return dict(params) if isinstance(params, Mapping) else list(params)
 
 
 @dataclass(frozen=True)
@@ -161,7 +183,7 @@ class HttpClient:
     async def get(
         self,
         url: str,
-        params: Mapping[str, str | int] | None = None,
+        params: Params | None = None,
         *,
         headers: Mapping[str, str] | None = None,
         sign_kalshi: bool = False,
@@ -190,7 +212,7 @@ class HttpClient:
             try:
                 # An empty params dict would make httpx drop the query string already in ``url``.
                 resp = await self._client.get(
-                    url, params=dict(params) if params else None, headers=req_headers
+                    url, params=_httpx_params(params), headers=req_headers
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc

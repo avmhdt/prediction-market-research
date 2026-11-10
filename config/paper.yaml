@@ -1,8 +1,26 @@
-# Book recorder and paper trader (SPEC section 10; used from M4). Paper only: no order is ever sent.
+# Book recorder and paper trader (SPEC section 10, FR-23, FR-24, D-09). Paper only: no code
+# path places, signs or cancels an order on any venue.
 poll_interval_s: 30
-markets: {from_pairs: confirmed, extra: [], max_markets: 200}
+markets:
+  from_pairs: confirmed          # confirmed cross-venue pairs from contract_map.yaml join the set
+  extra: []                      # explicit "venue:symbol" entries
+  max_markets: 200
+  # Top-up rule (milestone order changed by the owner on 2026-11-10): the rest of the set is
+  # the most active open markets per venue, refreshed every refresh_hours. Polymarket live
+  # reads are public, unauthenticated and limited to choosing this set and polling its books.
+  per_venue: {kalshi: 100, polymarket: 100}
+  min_days_to_close: 2           # skip markets closing sooner (they would leave the set at once)
+  refresh_hours: 24
+  polymarket_no_books: true      # also poll the NO token book (YES + NO arb, DQ-04 parity)
 strategies:
   arb_monitor: {enabled: true, max_notional_per_trade: 100, min_net_edge: 0.005}
   mm_quotes: {enabled: true, q_max: 100, capital_max: 1000}
   flb_tilt: {enabled: true, buckets: [[0.90, 0.97]], notional_per_market: 50}
 min_days: 28
+# Planned paper period (owner approved 2026-11-10): start 2026-11-15 00:00 UTC, end
+# 2026-12-13 00:00 UTC; it must end by 2026-12-15 (Windows Update pause).
+period: {start: "2026-11-15T00:00:00Z", end: "2026-12-13T00:00:00Z", hard_end: "2026-12-15T00:00:00Z"}
+rate_limits_rps: {clob.polymarket.com: 15, gamma-api.polymarket.com: 2, external-api.kalshi.com: 4}
+flush_every_cycles: 10           # raw parts are closed every 10 polls (5 minutes)
+disk_check_minutes: 10
+disk_warn_used_pct: 80

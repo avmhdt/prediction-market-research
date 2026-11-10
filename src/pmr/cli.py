@@ -392,35 +392,88 @@ def mm_sim(
 
 # ----------------------------------------------------------------------- record, paper
 
-record_app = typer.Typer(help="Book recorder (M4).", no_args_is_help=True)
+record_app = typer.Typer(help="Book recorder.", no_args_is_help=True)
 app.add_typer(record_app, name="record")
+
+PaperCfgOpt = Annotated[Path, typer.Option("--paper-config")]
+
+
+def parse_duration(text: str | None) -> float | None:
+    """``28d``, ``72h``, ``10m`` or ``30s`` to seconds (None for forever)."""
+    if not text:
+        return None
+    units = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+    if text[-1] not in units:
+        raise typer.BadParameter("use a number followed by d, h, m or s")
+    return float(text[:-1]) * units[text[-1]]
+
+
+def _recorder(config: Path, paper_config: Path, log_level: str | None, *, paper: bool) -> Any:
+    from pmr.fees.table import FeeTable
+    from pmr.normalize import categories
+    from pmr.paper.config import load_paper_config
+    from pmr.paper.recorder import Recorder, config_hash
+
+    settings, cfg = _setup(config, log_level)
+    pcfg = load_paper_config(paper_config, settings)
+    fees_path = Path("config/fees.yaml")
+    return Recorder(
+        settings,
+        cfg,
+        pcfg,
+        settings.data_dir(),
+        categories.load(),
+        FeeTable.load(fees_path),
+        paper=paper,
+        config_hash=config_hash(config, paper_config, fees_path),
+    )
 
 
 @record_app.command("books")
 def record_books(
     duration: Annotated[str | None, typer.Option("--duration")] = None,
-    paper_config: Annotated[Path, typer.Option("--paper-config")] = Path("config/paper.yaml"),
+    paper_config: PaperCfgOpt = Path("config/paper.yaml"),
     config: ConfigOpt = DEFAULT_CONFIG_PATH,
     log_level: LogOpt = None,
 ) -> None:
-    """Long-running poller for the paper-trading market set."""
-    _not_yet("record books", "M4")
+    """Poll books and trades for the market set (no paper strategies)."""
+    rec = _recorder(config, paper_config, log_level, paper=False)
+    asyncio.run(rec.run(parse_duration(duration)))
 
 
-paper_app = typer.Typer(help="Paper trader (M4, M6). Paper only.", no_args_is_help=True)
+paper_app = typer.Typer(
+    help="Paper trader. Paper only: no order is ever sent.", no_args_is_help=True
+)
 app.add_typer(paper_app, name="paper")
 
 
 @paper_app.command("run")
-def paper_run(config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None) -> None:
-    """Run the paper strategies forward on recorder data."""
-    _not_yet("paper run", "M4")
+def paper_run(
+    duration: Annotated[str | None, typer.Option("--duration")] = None,
+    paper_config: PaperCfgOpt = Path("config/paper.yaml"),
+    config: ConfigOpt = DEFAULT_CONFIG_PATH,
+    log_level: LogOpt = None,
+) -> None:
+    """Record books and run the paper strategies on every poll (the long-running service)."""
+    rec = _recorder(config, paper_config, log_level, paper=True)
+    asyncio.run(rec.run(parse_duration(duration)))
 
 
 @paper_app.command("status")
-def paper_status(config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None) -> None:
-    """Uptime, gaps and disk flag of the recorder and paper trader."""
-    _not_yet("paper status", "M4")
+def paper_status(
+    paper_config: PaperCfgOpt = Path("config/paper.yaml"),
+    config: ConfigOpt = DEFAULT_CONFIG_PATH,
+    log_level: LogOpt = None,
+) -> None:
+    """Uptime per venue, gaps and disk flag of the recorder and paper trader."""
+    import json as _json
+
+    from pmr.paper.config import load_paper_config
+    from pmr.paper.recorder import status
+
+    settings, _ = _setup(config, log_level)
+    pcfg = load_paper_config(paper_config, settings)
+    typer.echo(_json.dumps(status(settings.data_dir(), pcfg), indent=1))
 
 
 @paper_app.command("compare")

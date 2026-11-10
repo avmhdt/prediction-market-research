@@ -205,9 +205,11 @@ def candles(rec: dict[str, Any]) -> list[dict[str, Any]]:
 def book(rec: dict[str, Any], seq: int) -> list[dict[str, Any]]:
     """Rows from one order-book snapshot: YES bids (+1) and NO bids as YES asks (-1)."""
     body = rec.get("body")
-    ob = body.get("orderbook", body) if isinstance(body, dict) else {}
-    ob = ob or {}
-    ticker = (rec.get("key") or {}).get("ticker")
+    ob: dict[str, Any] = {}
+    if isinstance(body, dict):
+        ob = body.get("orderbook_fp") or body.get("orderbook") or body
+    ticker_from_body = body.get("ticker") if isinstance(body, dict) else None
+    ticker = (rec.get("key") or {}).get("ticker") or ticker_from_body
     out: list[dict[str, Any]] = []
 
     def levels(name: str) -> list[tuple[float, float]]:
