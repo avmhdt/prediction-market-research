@@ -116,7 +116,12 @@ def ingest_kalshi(
 
 @ingest_app.command("polymarket")
 def ingest_polymarket(
-    source: Annotated[str, typer.Option("--source", help="gamma|data|clob|onchain")] = "gamma",
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source", help="onchain-markets|onchain-fills (history, from Brazil); gamma|data|clob"
+        ),
+    ] = "gamma",
     since: Annotated[str | None, typer.Option("--since")] = None,
     until: Annotated[str | None, typer.Option("--until")] = None,
     config: ConfigOpt = DEFAULT_CONFIG_PATH,

@@ -136,6 +136,14 @@ async def ingest_polymarket(
         if source == "gamma":
             await GammaCollector(ctx).markets(stats)
             return
+        if source.startswith("onchain"):
+            if source == "onchain-markets":
+                await OnchainCollector(ctx).markets(stats)
+            elif source == "onchain-fills":
+                await OnchainCollector(ctx).fills(stats)
+            else:
+                raise CollectorError(f"unknown --source {source!r}")
+            return
         m = window_markets(data_dir, "polymarket", since, until)
         if source == "data":
             m = m.filter(pl.col("volume").fill_null(0) >= MIN_NOTIONAL_FOR_TRADES)
@@ -146,8 +154,6 @@ async def ingest_polymarket(
                 for r in m.iter_rows(named=True)
             ]
             await ClobCollector(ctx).prices(rows, stats)
-        elif source == "onchain":
-            await OnchainCollector(ctx).fills(m["symbol"].to_list(), stats)
         else:
             raise CollectorError(f"unknown --source {source!r}")
 
