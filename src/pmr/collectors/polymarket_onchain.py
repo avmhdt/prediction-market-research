@@ -64,6 +64,9 @@ class OnchainCollector:
     """Read-only Polygon log collector for Polymarket's contracts."""
 
     def __init__(self, ctx: CollectContext, oc: OnchainConfig | None = None) -> None:
+        # Log pages can be 10-20 MB of JSON: flush every few pages to bound memory.
+        ctx.flush_every = min(ctx.flush_every, int((oc or OnchainConfig.load()).raw.get(
+            "flush_every_pages", 20)))
         self.ctx = ctx
         self.oc = oc or OnchainConfig.load()
         self.url = str(self.oc["rpc_url"])

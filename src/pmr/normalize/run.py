@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from pmr.collectors.raw import iter_parts, part_id, read_part
-from pmr.normalize import kalshi, manifold, metaculus, polymarket
+from pmr.normalize import kalshi, manifold, metaculus, polymarket, polymarket_onchain
 from pmr.normalize.categories import CategoryMap
 from pmr.normalize.schema import frame
 from pmr.normalize.store import interim_path, interim_root, write_interim
@@ -64,6 +64,10 @@ def _metaculus_posts(rec: dict[str, Any], cats: CategoryMap) -> Rows:
     return {"markets": m, "price_history": p}
 
 
+def _onchain(rec: dict[str, Any], _: CategoryMap) -> Rows:
+    return polymarket_onchain.decode(rec)
+
+
 HANDLERS: dict[tuple[str, str], Handler] = {
     ("kalshi", "markets"): lambda r, c: {"markets": kalshi.markets(r, c)},
     ("kalshi", "historical_markets"): lambda r, c: {"markets": kalshi.markets(r, c)},
@@ -98,6 +102,8 @@ def normalize_part(path: Path, cats: CategoryMap) -> Rows:
     """All dataset rows from one raw part (empty when the endpoint has no normalizer)."""
     venue, endpoint = path.parts[-4], path.parts[-3]
     handler = HANDLERS.get((venue, endpoint))
+    if handler is None and venue == "polymarket" and endpoint.startswith("onchain_"):
+        handler = _onchain
     out: Rows = {}
     if handler is None:
         return out

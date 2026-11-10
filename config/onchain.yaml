@@ -9,6 +9,7 @@ fills_start_block: 37520000       # 2023-01-01
 full_fills_until: "2024-11-01T00:00:00Z"   # all taker fills before this time
 sample: {every_blocks: 1800, window_blocks: 300}   # then ~10 minutes (300 blocks) of every hour
 raw_budget_gb: 19.0               # stop before the 20 GB raw budget (NFR-13)
+flush_every_pages: 20             # pages are large; bounds memory per collector
 
 exchanges:                        # OrderFilled emitters; taker rows have topics[3] = the exchange
   - {name: ctf_v1, address: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", from_block: 33605403, topic: "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6", layout: v1}
