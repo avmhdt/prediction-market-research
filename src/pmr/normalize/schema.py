@@ -123,3 +123,12 @@ def frame(dataset: str, rows: list[dict[str, object]]) -> pl.DataFrame:
     schema = DATASETS[dataset]
     cols = {name: [r.get(name) for r in rows] for name in schema}
     return pl.DataFrame(cols, schema=schema)
+
+
+def _register_onchain() -> None:
+    from pmr.normalize.polymarket_onchain import SCHEMAS
+
+    DATASETS.update(SCHEMAS)
+
+
+_register_onchain()

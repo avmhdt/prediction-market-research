@@ -26,10 +26,14 @@ from pathlib import Path
 
 import duckdb
 import polars as pl
+import structlog
 
 from pmr.normalize.categories import CategoryMap
 from pmr.normalize.schema import MARKETS
 from pmr.normalize.store import interim_files, read_interim
+from pmr.warehouse import onchain
+
+log = structlog.get_logger("pmr.warehouse")
 
 HERE = Path(__file__).resolve().parent
 DDL = HERE / "ddl.sql"
@@ -186,7 +190,18 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
             con.execute(mig.path.read_text(encoding="utf-8"))
 
         events = read_interim(data_dir, "events")
-        markets = version_markets(read_interim(data_dir, "markets"), events, cats)
+        oc_tables = {
+            name: read_interim(data_dir, name)
+            for name in ("oc_conditions", "oc_resolutions", "oc_questions", "oc_tokens")
+        }
+        oc_markets, tmap = onchain.markets(oc_tables, cats)
+        if tmap.height:
+            checked, bad = onchain.check_tokens(tmap, oc_tables["oc_tokens"])
+            log.info("onchain_token_check", conditions=checked, mismatches=bad)
+        raw_markets = read_interim(data_dir, "markets")
+        if oc_markets.height:
+            raw_markets = pl.concat([raw_markets, oc_markets], how="vertical")
+        markets = version_markets(raw_markets, events, cats)
         cols = [*MARKETS.keys(), "rules_changed", "valid_to"]
         con.register("m_df", markets.select(cols).to_arrow())
         con.execute(f"INSERT INTO markets ({', '.join(cols)}) SELECT {', '.join(cols)} FROM m_df")
@@ -223,6 +238,13 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
                 WHERE t.rn = 1
                 ORDER BY t.venue, t.market_id, t.ts_exchange, t.trade_id
                 """
+            )
+        files = interim_files(data_dir, "oc_fills")
+        if files:
+            onchain.insert_trades(
+                con,
+                f"SELECT * FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)",
+                tmap,
             )
         files = interim_files(data_dir, "price_history")
         if files:
