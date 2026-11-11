@@ -211,6 +211,8 @@ class Recorder:
                     self.health[venue].last_success_ns = int(last)
                     if now - int(last) > limit:
                         self._gap(venue, int(last), now, "downtime")
+                        # The outage is logged; the first cycle must not log it again.
+                        self.health[venue].last_success_ns = now
 
     # ------------------------------------------------------------------ market set
 
@@ -599,14 +601,29 @@ def status(data_dir: Path, pcfg: PaperConfig, now_ns: int | None = None) -> dict
     span = max(1, now - start)
     uptime: dict[str, float] = {}
     for venue in ("kalshi", "polymarket"):
+        # Merge overlapping gap rows so one outage is never counted twice.
+        spans = sorted(
+            (max(int(g["start_ts"]), start), min(int(g["end_ts"]), now))
+            for g in gaps
+            if g["venue"] == venue
+        )
         down = 0
         covered = 0
-        for g in gaps:
-            if g["venue"] != venue:
+        cur_a = cur_b = None
+        for a, b in spans:
+            if b <= a:
                 continue
-            a, b = max(int(g["start_ts"]), start), min(int(g["end_ts"]), now)
-            down += max(0, b - a)
-            covered = max(covered, int(g["end_ts"]))
+            if cur_b is None or a > cur_b:
+                if cur_b is not None and cur_a is not None:
+                    down += cur_b - cur_a
+                cur_a, cur_b = a, b
+            else:
+                cur_b = max(cur_b, b)
+        if cur_a is not None and cur_b is not None:
+            down += cur_b - cur_a
+        for g in gaps:
+            if g["venue"] == venue:
+                covered = max(covered, int(g["end_ts"]))
         last = max(int((hb.get("last_success_ns") or {}).get(venue) or 0), covered)
         if last and now - last > 3 * pcfg.poll_interval_s * NS:
             down += now - max(last, start)  # an open gap not yet in gaps.csv

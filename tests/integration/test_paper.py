@@ -509,3 +509,22 @@ def test_restore_skips_a_crash_damaged_line(tmp_path: Path) -> None:
     third = Ledger(tmp_path, "h")
     restore(third)
     assert third.positions[("mm_quotes", "kalshi", "A")].q == 5
+
+
+def test_status_counts_overlapping_gap_rows_once(tmp_path: Path) -> None:
+    d = tmp_path / "paper"
+    d.mkdir()
+    t = int(T0 * NS)
+    (d / "run.json").write_text(json.dumps({"first_start_ns": t}))
+    (d / "heartbeat.json").write_text(
+        json.dumps({"last_success_ns": {"kalshi": t + 1000 * NS, "polymarket": t + 1000 * NS}})
+    )
+    (d / "gaps.csv").write_text(
+        "venue,start_ts,end_ts,seconds,reason\n"
+        f"kalshi,{t + 100 * NS},{t + 600 * NS},500,downtime\n"
+        f"kalshi,{t + 100 * NS},{t + 610 * NS},510,no successful poll\n"
+        f"kalshi,{t + 700 * NS},{t + 800 * NS},100,no successful poll\n"
+    )
+    st = status(tmp_path, pcfg(period=None), now_ns=t + 1000 * NS)
+    assert st["uptime_pct"]["kalshi"] == pytest.approx(100 * (1 - 610 / 1000))
+    assert st["uptime_pct"]["polymarket"] == 100.0
