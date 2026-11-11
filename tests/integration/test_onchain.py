@@ -14,7 +14,7 @@ import respx
 from pmr.collectors.base import CollectContext, CollectorError, IngestStats
 from pmr.collectors.polymarket_onchain import OnchainCollector, OnchainConfig, pad_address
 from pmr.collectors.raw import iter_parts, read_part
-from pmr.http.client import HttpClient
+from pmr.http.client import HttpClient, HttpError
 from pmr.http.guard import GuardError, check_jsonrpc
 from pmr.http.ratelimit import RateLimiterRegistry
 from pmr.settings import PmrConfig, Settings
@@ -28,6 +28,7 @@ EX = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 def oc(**kw: Any) -> OnchainConfig:
     raw: dict[str, Any] = {
         "rpc_url": RPC,
+        "rate_limit_rps": 10_000,
         "max_block_range": 100,
         "market_start_block": 0,
         "fills_start_block": 0,
@@ -213,3 +214,38 @@ def test_shipped_onchain_config_is_consistent() -> None:
     for e in c["market_events"]:
         assert all(t.startswith("0x") and len(t) == 66 for t in e["topics"])
     assert c["sample"] == {"every_blocks": 1800, "window_blocks": 300}
+
+
+@respx.mock
+async def test_patient_pause_on_sustained_rate_limits(
+    tmp_path: Path, settings: Settings, cfg: PmrConfig
+) -> None:
+    gw = Gateway()
+    calls = {"n": 0}
+
+    def refuse_then_serve(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 9:  # longer than the client's 6 retries
+            return httpx.Response(429)
+        return gw(request)
+
+    respx.post(RPC).mock(side_effect=refuse_then_serve)
+    ctx = await _ctx(tmp_path, settings, cfg)
+    col = OnchainCollector(ctx, oc())
+    pauses: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        pauses.append(s)
+
+    col._sleep = fake_sleep
+    assert await col.head() == 400
+    assert pauses == [60.0]
+    col2 = OnchainCollector(ctx, oc(patience_hours=0))
+    col2._sleep = fake_sleep
+    calls["n"] = 0
+    with pytest.raises(HttpError):
+        await col2.head()
+    respx.post(RPC).mock(return_value=httpx.Response(400, json={"error": "bad"}))
+    with pytest.raises(HttpError):
+        await col.head()  # not transient: fails at once
+    await ctx.http.aclose()

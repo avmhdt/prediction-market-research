@@ -2,7 +2,8 @@
 # Addresses and event topics: docs.polymarket.com contracts page, Polymarket's GitHub repos and
 # Polygonscan, read 2026-11-10; topic hashes recomputed with keccak-256 (docs/venue_notes.md).
 rpc_url: https://gateway.tenderly.co/public/polygon
-rate_limit_rps: 1.0
+rate_limit_rps: 0.5               # the gateway answered 429 after ~50 min at 1 req/s (2026-11-10)
+patience_hours: 12                # on refusals, pause with doubling waits instead of failing
 max_block_range: 1000000          # the gateway accepted 1M-block ranges, capped at 20,000 results
 market_start_block: 29000000      # mid-2022: catches conditions prepared before the study window
 fills_start_block: 37520000       # 2023-01-01

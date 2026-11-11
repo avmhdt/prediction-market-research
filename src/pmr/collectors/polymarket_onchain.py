@@ -20,16 +20,22 @@ is used up (``raw_budget_gb``).
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+import structlog
 import yaml
 
 from pmr.collectors.base import CollectContext, CollectorError, IngestStats, Stream
 from pmr.collectors.raw import raw_root
+from pmr.http.client import HttpError
+
+log = structlog.get_logger("pmr.onchain")
 
 VENUE = "polymarket"
 DEFAULT_PATH = Path("config/onchain.yaml")
@@ -65,11 +71,17 @@ class OnchainCollector:
 
     def __init__(self, ctx: CollectContext, oc: OnchainConfig | None = None) -> None:
         # Log pages can be 10-20 MB of JSON: flush every few pages to bound memory.
-        ctx.flush_every = min(ctx.flush_every, int((oc or OnchainConfig.load()).raw.get(
-            "flush_every_pages", 20)))
+        ctx.flush_every = min(
+            ctx.flush_every, int((oc or OnchainConfig.load()).raw.get("flush_every_pages", 20))
+        )
         self.ctx = ctx
         self.oc = oc or OnchainConfig.load()
         self.url = str(self.oc["rpc_url"])
+        self._sleep = asyncio.sleep
+        host = (urlsplit(self.url).hostname or "").lower()
+        rps = float(self.oc.raw.get("rate_limit_rps", 0.5))
+        ctx.http.limits.per_host[host] = rps
+        ctx.http.limits._limiters.pop(host, None)  # take the configured rate on first use
         self.budget = float(self.oc["raw_budget_gb"]) * 1e9
         self._requests = 0
         self._raw_bytes = dir_bytes(raw_root(ctx.data_dir) / VENUE)
@@ -77,8 +89,24 @@ class OnchainCollector:
     # ----------------------------------------------------------------- basics
 
     async def _call(self, method: str, params: list[Any]) -> Any:
-        res = await self.ctx.http.rpc(self.url, method, params)
-        return res
+        """One RPC call; when the gateway keeps refusing (rate limit, 5xx, network), pause
+        with doubling waits (1 min up to 30 min) instead of failing, for at most
+        ``patience_hours`` in total. Each pause is logged; nothing is sent meanwhile."""
+        wait, waited = 60.0, 0.0
+        limit = float(self.oc.raw.get("patience_hours", 12)) * 3600
+        while True:
+            try:
+                return await self.ctx.http.rpc(self.url, method, params)
+            except HttpError as exc:
+                transient = exc.status in (None, 429, 500, 502, 503, 504)
+                if not transient or waited >= limit:
+                    raise
+                log.warning(
+                    "gateway_pause", seconds=wait, waited_s=waited, status=exc.status, method=method
+                )
+                await self._sleep(wait)
+                waited += wait
+                wait = min(wait * 2, 1800.0)
 
     async def head(self) -> int:
         """Latest block number."""
