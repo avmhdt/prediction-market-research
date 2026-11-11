@@ -1,0 +1,91 @@
+# Polymarket history from public Polygon data (owner decisions of 2026-11-10; D-04 replaced).
+# Addresses and event topics: docs.polymarket.com contracts page, Polymarket's GitHub repos and
+# Polygonscan, read 2026-11-10; topic hashes recomputed with keccak-256 (docs/venue_notes.md).
+rpc_url: https://gateway.tenderly.co/public/polygon
+rate_limit_rps: 0.5               # the gateway answered 429 after ~50 min at 1 req/s (2026-11-10)
+patience_hours: 12                # on refusals, pause with doubling waits instead of failing
+max_block_range: 1000000          # the gateway accepted 1M-block ranges, capped at 20,000 results
+market_start_block: 29000000      # mid-2022: catches conditions prepared before the study window
+fills_start_block: 37520000       # 2023-01-01
+full_fills_until: "2024-11-01T00:00:00Z"   # all taker fills before this time
+sample: {every_blocks: 1800, window_blocks: 300}   # then ~10 minutes (300 blocks) of every hour
+raw_budget_gb: 19.0               # stop before the 20 GB raw budget (NFR-13)
+flush_every_pages: 20             # pages are large; bounds memory per collector
+
+exchanges:                        # OrderFilled emitters; taker rows have topics[3] = the exchange
+  - {name: ctf_v1, address: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", from_block: 33605403, topic: "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6", layout: v1}
+  - {name: negrisk_v1, address: "0xC5d563A36AE78145C45a50134d48A1215220f80a", from_block: 50505492, topic: "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6", layout: v1}
+  - {name: ctf_v2, address: "0xE111180000d2663C0091e4f400237545B87B996B", from_block: 84902353, topic: "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee", layout: v2}
+  - {name: negrisk_v2, address: "0xe2222d279d744050d28e00520010520000310F59", from_block: 85058176, topic: "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee", layout: v2}
+  - {name: protocol_v2, address: "0xe3333700cA9d93003F00f0F71f8515005F6c00Aa", from_block: 87479471, topic: "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee", layout: v3}
+
+# Oracles whose CTF conditions are Polymarket's (other apps share the CTF contract).
+oracles:
+  - "0xCB1822859cEF82Cd2Eb4E6276C7916e692995130"   # UMA CTF adapter v1.0.0
+  - "0xB97455fcF78eb37375e8be6f26df895341CA073d"   # UMA CTF adapter v1.0.1
+  - "0x6A9D222616C90FcA5754cd1333cFD9b7fb6a4F74"   # UMA CTF adapter v2.0.0
+  - "0x71392E133063CC0D16F40E1F9B60227404Bc03f7"   # UMA CTF adapter v3.0.0
+  - "0x157Ce2d672854c848c9b79C49a8Cc6cc89176a49"   # UMA CTF adapter v3.1.0
+  - "0x65070BE91477460D8A7AeEb94ef92fe056C2f2A7"   # UMA CTF adapter V4
+  - "0xb21182d0494521Cf45DbbeEbb5A3ACAAb6d22093"   # UMA sports oracle
+  - "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"   # NegRiskAdapter
+
+# Low-volume market-layer events, collected completely. topic_filter_index/values restrict a
+# topic position server-side (for example the CTF oracle in topics[2]).
+market_events:
+  - name: ctf_preparation
+    addresses: ["0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"]
+    topics: ["0xab3760c3bd2bb38b5bcf54dc79802ed67338b4cf29f3054ded67ed24661e4177"]
+    filter_oracles_at: 2
+  - name: ctf_resolution
+    addresses: ["0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"]
+    topics: ["0xb44d84d3289691f71497564b85d4233648d9dbae8cbdbb4329f301c3a0185894"]
+    filter_oracles_at: 2
+  - name: uma_questions
+    addresses:
+      - "0xCB1822859cEF82Cd2Eb4E6276C7916e692995130"
+      - "0xB97455fcF78eb37375e8be6f26df895341CA073d"
+      - "0x6A9D222616C90FcA5754cd1333cFD9b7fb6a4F74"
+      - "0x71392E133063CC0D16F40E1F9B60227404Bc03f7"
+      - "0x157Ce2d672854c848c9b79C49a8Cc6cc89176a49"
+      - "0x2F5e3684cb1F318ec51b00Edba38d79Ac2c0aA9d"
+      - "0x65070BE91477460D8A7AeEb94ef92fe056C2f2A7"
+    topics:
+      - "0xeee0897acd6893adcaf2ba5158191b3601098ab6bece35c5d57874340b64c5b7"   # QuestionInitialized
+      - "0x566c3fbdd12dd86bb341787f6d531f79fd7ad4ce7e3ae2d15ac0ca1b601af9df"   # QuestionResolved
+      - "0x7981b5832932948db4e32a4a16a0f44b2ce7ff088574afb9364b313f70f82e8f"   # QuestionReset
+      - "0x5909815fe7fe0a550d5fcb95fbf33821b580521d3c97089c6ce12808d1cd0566"   # QuestionManuallyResolved
+      - "0x2435a0347185933b12027c6f394a5fd9c03646dba233e956f50658719dfc0b35"   # QuestionFlagged
+      - "0x0059e11815211969c0c4aaf3f498b52b6c2f2d14f286275d0862d70de22a836b"   # AncillaryDataUpdated
+  - name: negrisk_adapter
+    addresses: ["0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"]
+    topics:
+      - "0xf059ab16d1ca60e123eab60e3c02b68faf060347c701a5d14885a8e1def7b3a8"   # MarketPrepared
+      - "0xaac410f87d423a922a7b226ac68f0c2eaf5bf6d15e644ac0758c7f96e2c253f7"   # QuestionPrepared
+      - "0x9e9fa7fd355160bd4cd3f22d4333519354beff1f5689bde87f2c5e63d8d484b2"   # OutcomeReported
+  - name: negrisk_operator
+    addresses: ["0x71523d0f655B41E805Cec45b17163f528B59B820"]
+    topics:
+      - "0x8138c0666fe0f752ff38486f542284f127aef02642c9c8db716ee1088839eeb0"   # MarketPrepared
+      - "0xcdc45423ec79c60a3fe3de57272e598d71a4ec88822e822ac8e134184a8435aa"   # QuestionPrepared
+      - "0x5c3937ed929cd157b73b417381d743daf6e1ef65999e3ccb5dd64bc3247e28d6"   # QuestionResolved
+  - name: token_registered
+    addresses: ["0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", "0xC5d563A36AE78145C45a50134d48A1215220f80a"]
+    topics: ["0xbc9a2432e8aeb48327246cddd6e872ef452812b4243c04e6bfb786a2cd8faf0d"]
+  - name: v2_rules
+    from_block: 87479000
+    addresses: ["0x53703dd6129d723066b6362510e5ae2fecd48218"]
+    topics:
+      - "0x459464e3d93204e986f0b20e33596daba585b1f37d5afe1eb1821551f7cb6f49"   # RequestRegistered
+      - "0x5061ad2ed550b0781f3940989ca7175019751d1c365d7df449b7f9d3d2dad46e"   # RequestRulesUpdated
+  - name: v2_lifecycle
+    from_block: 87479000
+    addresses:
+      - "0x1000008dD9001B968442c1000017eaE6E0dA00Ba"   # BinaryModule
+      - "0x200000900045e3B6259600682756002200028933"   # NegRiskModule
+      - "0x30000034706C7d8e12009DAB006Be20000c031A8"   # CombinatorialModule
+    topics:
+      - "0xe560c1a2847d4cf2e66de11fe592605556989449f38cc3ab96e2e287daa68caa"   # ConditionResolved
+      - "0x9bdf886b29ff2e03765aa003845c79f3700b39f9628db119aeeaac5d0fd73306"   # EventPrepared
+      - "0x0da49435dfd3b856758ee0b1a2500f1e8062fed24dd654594af9fa163cc5bcb4"   # MigrationConditionRegistered
+      - "0xf87100968b0fe70751acf87590ffac515231c5b999cba36e6820c7d312dcc8af"   # MigrationResolved

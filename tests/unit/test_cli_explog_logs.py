@@ -14,17 +14,6 @@ from pmr import cli, explog, logs
 REPO = Path(__file__).resolve().parents[2]
 
 STUBS = [
-    ["ingest", "kalshi"],
-    ["ingest", "polymarket"],
-    ["ingest", "manifold"],
-    ["ingest", "metaculus"],
-    ["ingest", "fred"],
-    ["normalize"],
-    ["warehouse", "build"],
-    ["warehouse", "migrate"],
-    ["warehouse", "stats"],
-    ["warehouse", "checksum"],
-    ["inventory"],
     ["match", "candidates"],
     ["match", "export-review"],
     ["match", "import-review"],
@@ -97,3 +86,30 @@ def test_logs_redact_secrets(capsys: pytest.CaptureFixture[str]) -> None:
     logs.configure("WARNING", json=False)
     structlog.get_logger("t").info("hidden")
     assert "hidden" not in capsys.readouterr().err
+
+
+def test_ingest_commands_refuse_without_permission_or_token(tmp_path: Path) -> None:
+    text = (REPO / "config" / "pmr.yaml").read_text(encoding="utf-8")
+    cfg = tmp_path / "pmr.yaml"
+    cfg.write_text(
+        text.replace("storage_allowed: true", "storage_allowed: false"), encoding="utf-8"
+    )
+    r = CliRunner().invoke(cli.app, ["ingest", "kalshi", "--what", "markets", "--config", str(cfg)])
+    assert r.exit_code == 3 and "owner's ruling" in r.output
+    r = CliRunner().invoke(cli.app, ["ingest", "metaculus"])
+    assert r.exit_code == 3 and "METACULUS_API_TOKEN" in r.output
+
+
+def test_normalize_build_stats_checksum_inventory_on_empty_data(tmp_path: Path) -> None:
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["normalize"]).exit_code == 0
+    wh = tmp_path / "w.duckdb"
+    for args in (
+        ["warehouse", "build", "--path", str(wh)],
+        ["warehouse", "migrate", "--path", str(wh)],
+        ["warehouse", "stats", "--path", str(wh)],
+        ["warehouse", "checksum", "--path", str(wh)],
+    ):
+        res = runner.invoke(cli.app, args)
+        assert res.exit_code == 0, (args, res.output)
+    assert "markets 0:0:0" in res.output
