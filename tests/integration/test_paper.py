@@ -464,3 +464,48 @@ def test_market_set_update_and_persistence(tmp_path: Path) -> None:
     assert back.members == s.members and back.history == s.history
     assert MarketSet.load(tmp_path / "none.json").members == {}
     assert meta("kalshi:Z", fee_type="quadratic_with_maker_fees").maker_fee_unknown
+
+
+def test_restore_skips_a_crash_damaged_line(tmp_path: Path) -> None:
+    led = Ledger(tmp_path, "h")
+    ts = int(T0 * NS)
+    led.write(
+        [
+            {
+                "type": "fill",
+                "ts": ts,
+                "strategy": "mm_quotes",
+                "venue": "kalshi",
+                "symbol": "A",
+                "side": 1,
+                "price": 0.5,
+                "qty": 4,
+                "fee": 0.0,
+            }
+        ]
+    )
+    path = next(tmp_path.glob("paper-*.jsonl"))
+    with path.open("ab") as fh:
+        fh.write(b"\x00" * 3589)  # what the 2026-11-11 crash left behind
+    again = Ledger(tmp_path, "h")
+    restore(again)
+    assert again.corrupt_lines == 1
+    assert again.positions[("mm_quotes", "kalshi", "A")].q == 4
+    again.write(
+        [
+            {
+                "type": "fill",
+                "ts": ts + 1,
+                "strategy": "mm_quotes",
+                "venue": "kalshi",
+                "symbol": "A",
+                "side": 1,
+                "price": 0.5,
+                "qty": 1,
+                "fee": 0.0,
+            }
+        ]
+    )
+    third = Ledger(tmp_path, "h")
+    restore(third)
+    assert third.positions[("mm_quotes", "kalshi", "A")].q == 5

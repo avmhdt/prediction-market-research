@@ -13,11 +13,16 @@ its settlement value.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import structlog
+
+log = structlog.get_logger("pmr.paper")
 
 
 @dataclass
@@ -38,6 +43,7 @@ class Ledger:
     config_hash: str
     positions: dict[tuple[str, str, str], Position] = field(default_factory=dict)
     last_mark_day: str | None = None
+    corrupt_lines: int = 0
 
     def _path(self, ts: int) -> Path:
         day = datetime.fromtimestamp(ts / 1e9, tz=UTC).strftime("%Y-%m-%d")
@@ -59,6 +65,8 @@ class Ledger:
         for path, lines in by_file.items():
             with path.open("a", encoding="utf-8", newline="\n") as fh:
                 fh.write("\n".join(lines) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())  # a crash must not leave zero-filled lines behind
         return n
 
     def _apply(self, e: dict[str, Any]) -> None:
@@ -133,11 +141,35 @@ def restore(ledger: Ledger) -> set[str]:
     """
     flb_done: set[str] = set()
     for path in sorted(ledger.directory.glob("paper-*.jsonl")):
-        with path.open(encoding="utf-8") as fh:
-            for line in fh:
-                if not line.strip():
+        with path.open("rb") as fb:
+            fb.seek(0, os.SEEK_END)
+            size = fb.tell()
+            if size:
+                fb.seek(size - 1)
+                tail = fb.read(1)
+        if size and tail != b"\n":
+            # Close a line cut off by a crash so the next event starts on its own line
+            # (append only: existing bytes are never rewritten).
+            with path.open("ab") as fa:
+                fa.write(b"\n")
+                fa.flush()
+                os.fsync(fa.fileno())
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for raw_line in fh:
+                line = raw_line.lstrip("\x00")
+                if not line.strip("\x00\n\r\t "):
+                    if chr(0) in raw_line:  # zero-filled: cut off by a crash
+                        ledger.corrupt_lines += 1
+                        log.warning("ledger_corrupt_line", file=path.name, length=len(line))
                     continue
-                e = json.loads(line)
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    # A line cut off by a crash. It stays in the file, is skipped, counted
+                    # and logged, and never blocks a restart.
+                    ledger.corrupt_lines += 1
+                    log.warning("ledger_corrupt_line", file=path.name, length=len(line))
+                    continue
                 t = e.get("type")
                 if t == "fill":
                     ledger._apply(e)
