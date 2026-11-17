@@ -119,14 +119,22 @@ def version_markets(raw: pl.DataFrame, events: pl.DataFrame, cats: CategoryMap) 
         m = m.with_columns(
             pl.coalesce("category_raw", "_se_cat", "_ev_cat").alias("category_raw")
         ).drop("_ev_series", "_ev_cat", "_se_cat")
-    m = m.with_columns(
-        pl.struct("venue", "category_raw", "category")
-        .map_elements(
-            lambda s: s["category"] or cats.map(s["venue"], (s["category_raw"] or "").split("|")),
-            return_dtype=pl.String,
+    # Map each distinct (venue, raw labels) once, then join: millions of markets share a few
+    # thousand label sets.
+    labels = m.filter(pl.col("category").is_null()).select("venue", "category_raw").unique()
+    if labels.height:
+        mapped = labels.with_columns(
+            pl.Series(
+                "_cat",
+                [
+                    cats.map(v, (raw or "").split("|"))
+                    for v, raw in labels.select("venue", "category_raw").iter_rows()
+                ],
+                dtype=pl.String,
+            )
         )
-        .alias("category")
-    )
+        m = m.join(mapped, on=["venue", "category_raw"], how="left", nulls_equal=True)
+        m = m.with_columns(pl.coalesce("category", "_cat").alias("category")).drop("_cat")
     # Drop lite records where a full record of the same market exists.
     has_full = m.group_by("venue", "symbol").agg(
         pl.col("rules_text").is_not_null().any().alias("_any_full")
