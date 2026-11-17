@@ -24,3 +24,6 @@ rate_limits_rps: {clob.polymarket.com: 15, gamma-api.polymarket.com: 2, external
 flush_every_cycles: 10           # raw parts are closed every 10 polls (5 minutes)
 disk_check_minutes: 10
 disk_warn_used_pct: 80
+# The drive holding WSL and the repo (moved from failing D: to G: on 2026-11-17); warn below 150 GB.
+host_drive_path: /mnt/g
+host_drive_min_free_gb: 150

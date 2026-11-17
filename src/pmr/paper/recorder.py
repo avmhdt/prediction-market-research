@@ -478,15 +478,19 @@ class Recorder:
             u = shutil.disk_usage(self.data_dir)
             used = 100.0 * u.used / u.total
             self.disk_warn = used >= self.pcfg.disk_warn_used_pct
-            self._disk_info = {
+            self._disk_info: dict[str, Any] = {
                 "data_fs_used_pct": round(used, 1),
                 "data_fs_free_gb": round(u.free / 1e9, 1),
             }
-            if Path("/mnt/d").exists():
+            host = Path(self.pcfg.host_drive_path)
+            if host.exists():
                 try:
-                    d = shutil.disk_usage("/mnt/d")
-                    self._disk_info["d_drive_free_gb"] = round(d.free / 1e9, 1)
-                    self.disk_warn = self.disk_warn or d.free < 150e9
+                    d = shutil.disk_usage(host)
+                    self._disk_info["host_drive"] = str(host)
+                    self._disk_info["host_drive_free_gb"] = round(d.free / 1e9, 1)
+                    self.disk_warn = (
+                        self.disk_warn or d.free < self.pcfg.host_drive_min_free_gb * 1e9
+                    )
                 except OSError:
                     pass
             if self.disk_warn:

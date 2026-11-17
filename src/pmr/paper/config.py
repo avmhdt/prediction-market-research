@@ -65,6 +65,8 @@ class PaperConfig(_M):
     flush_every_cycles: int = Field(default=10, ge=1)
     disk_check_minutes: float = 10.0
     disk_warn_used_pct: float = 80.0
+    host_drive_path: str = "/mnt/g"  # the Windows drive that holds WSL and the repo
+    host_drive_min_free_gb: float = 150.0
 
 
 def load_paper_config(path: Path, settings: Settings | None = None) -> PaperConfig:
