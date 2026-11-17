@@ -369,7 +369,96 @@ def arb_scan(
     log_level: LogOpt = None,
 ) -> None:
     """Cross-venue and intra-venue scan net of fees, lockup and resolution haircut."""
-    _not_yet("arb scan", "M4")
+    from pmr import explog
+    from pmr.analysis.arb import ArbConfig
+    from pmr.analysis.scan import scan
+    from pmr.fees.table import FeeTable
+    from pmr.paper.recorder import latest_dtb3
+
+    if historical == live:
+        typer.echo("pmr arb scan: choose exactly one of --historical or --live", err=True)
+        raise typer.Exit(code=2)
+    settings, cfg = _setup(config, log_level)
+    acfg = ArbConfig(
+        fees=FeeTable.load(Path("config/fees.yaml")),
+        r_annual=latest_dtb3(settings.data_dir()),
+        collateral_yield=dict(cfg.arb.collateral_yield),
+        settlement_lag_hours={
+            "kalshi": cfg.venues.kalshi.settlement_lag_hours,
+            "polymarket": cfg.venues.polymarket.settlement_lag_hours,
+        },
+        transfer_cost_per_contract=cfg.arb.transfer_cost_per_contract,
+        divergence_prior=cfg.arb.divergence_prior,
+    )
+    lo = date.fromisoformat(since) if since else None
+    hi = date.fromisoformat(until) if until else None
+    res = scan(settings.warehouse_path(), acfg, since=lo, until=hi, live=live)
+    mode = "live" if live else "historical"
+    out_dir = settings.data_dir() / "processed"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n = res.rows.height
+    if n:
+        res.rows.write_parquet(out_dir / f"arb_opportunities_{mode}.parquet")
+    summary = summarize_arb(res.rows, res.snapshots_checked, mode)
+    Path("results").mkdir(exist_ok=True)
+    summary.write_csv(f"results/arb_scan_{mode}_summary.csv", float_precision=6)
+    explog.append(
+        f"arb scan --{mode}",
+        params={"since": since, "until": until},
+        n=res.snapshots_checked,
+        metrics={"rows": n, "net_positive": int(summary["net_positive"].sum())},
+        cfg_hash=explog.config_hash(config, Path("config/fees.yaml")),
+    )
+    typer.echo(f"pmr arb scan --{mode}: {res.snapshots_checked} snapshots, {n} rows")
+
+
+def summarize_arb(rows: Any, snapshots: int, mode: str) -> Any:
+    """Aggregate opportunity rows per kind (aggregates only are committed)."""
+    import polars as pl
+
+    if rows.is_empty():
+        return pl.DataFrame(
+            {
+                "mode": [mode],
+                "kind": ["all"],
+                "snapshots_checked": [snapshots],
+                "n": [0],
+                "net_positive": [0],
+                "median_gross_edge": [None],
+                "median_net_edge": [None],
+            },
+            schema={
+                "mode": pl.String,
+                "kind": pl.String,
+                "snapshots_checked": pl.Int64,
+                "n": pl.Int64,
+                "net_positive": pl.Int64,
+                "median_gross_edge": pl.Float64,
+                "median_net_edge": pl.Float64,
+            },
+        )
+    return (
+        rows.group_by("kind")
+        .agg(
+            pl.len().cast(pl.Int64).alias("n"),
+            (pl.col("net_edge") > 0).sum().cast(pl.Int64).alias("net_positive"),
+            pl.col("gross_edge").median().alias("median_gross_edge"),
+            pl.col("net_edge").median().alias("median_net_edge"),
+        )
+        .with_columns(
+            pl.lit(mode).alias("mode"), pl.lit(snapshots).cast(pl.Int64).alias("snapshots_checked")
+        )
+        .select(
+            "mode",
+            "kind",
+            "snapshots_checked",
+            "n",
+            "net_positive",
+            "median_gross_edge",
+            "median_net_edge",
+        )
+        .sort("kind")
+    )
 
 
 @arb_app.command("catalogue")
@@ -392,7 +481,46 @@ def mm_sim(
     log_level: LogOpt = None,
 ) -> None:
     """Simulate market making on recorded books and trades."""
-    _not_yet("mm sim", "M4")
+    from pmr import explog
+    from pmr.sim.mm import MMParams
+    from pmr.sim.run import paper_symbols, run
+
+    if (market is None) == (set_ is None):
+        typer.echo("pmr mm sim: give exactly one of --market VENUE:SYMBOL or --set paper", err=True)
+        raise typer.Exit(code=2)
+    settings, cfg = _setup(config, log_level)
+    if market:
+        venue, _, symbol = market.partition(":")
+        markets = [(venue, symbol)]
+    elif set_ == "paper":
+        markets = paper_symbols(settings.data_dir())
+    else:
+        typer.echo(f"pmr mm sim: unknown set {set_!r} (only 'paper')", err=True)
+        raise typer.Exit(code=2)
+    p = cfg.mm
+    params = MMParams(
+        half_spread=p.half_spread,
+        skew_gamma=p.skew_gamma,
+        q_max=p.q_max,
+        capital_max=p.capital_max,
+        ema_halflife_s=p.ema_halflife_s,
+    )
+    lo = date.fromisoformat(since) if since else None
+    hi = date.fromisoformat(until) if until else None
+    df = run(settings.warehouse_path(), params, markets, since=lo, until=hi)
+    Path("results").mkdir(exist_ok=True)
+    df.write_csv("results/mm_pnl_decomposition.csv", float_precision=4)
+    explog.append(
+        "mm sim",
+        params={"market": market, "set": set_, "since": since, "until": until},
+        n=df.height,
+        metrics={
+            "total": float(df["total"].sum()) if df.height else 0.0,
+            "fills": int(df["n_fills"].sum()) if df.height else 0,
+        },
+        cfg_hash=explog.config_hash(config),
+    )
+    typer.echo(f"pmr mm sim: {df.height} markets -> results/mm_pnl_decomposition.csv")
 
 
 # ----------------------------------------------------------------------- record, paper
