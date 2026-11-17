@@ -176,6 +176,9 @@ def insert_trades(con: duckdb.DuckDBPyConnection, fills_sql: str, tmap: pl.DataF
         JOIN oc_tmap m ON f.token_id = m.token_id
         JOIN oc_tmap y ON y.condition_id = m.condition_id AND y.outcome = 0
         WHERE f.rn = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM trades t WHERE t.venue = 'polymarket' AND t.trade_id = f.trade_id
+          )
         ORDER BY m.condition_id, f.ts, f.trade_id
         """
     )

@@ -54,6 +54,17 @@ def _book(fn: Callable[[dict[str, Any], int], list[dict[str, Any]]]) -> Handler:
     return h
 
 
+def _kalshi_batch_books(rec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Recorder pages of ``/markets/orderbooks``: one snapshot per ticker in the batch."""
+    body = rec.get("body")
+    out: list[dict[str, Any]] = []
+    for ob in body.get("orderbooks", []) if isinstance(body, dict) else []:
+        if isinstance(ob, dict):
+            one = {"ts_recv_ns": rec["ts_recv_ns"], "key": {"ticker": ob.get("ticker")}, "body": ob}
+            out += kalshi.book(one, 0)
+    return out
+
+
 def _manifold_bets(rec: dict[str, Any], _: CategoryMap) -> Rows:
     t, p = manifold.bets(rec)
     return {"trades": t, "price_history": p}
@@ -76,10 +87,16 @@ HANDLERS: dict[tuple[str, str], Handler] = {
     ("kalshi", "trades"): lambda r, c: {"trades": kalshi.trades(r)},
     ("kalshi", "candles"): lambda r, c: {"price_history": kalshi.candles(r)},
     ("kalshi", "books"): _book(kalshi.book),
+    ("kalshi", "rec_books"): lambda r, c: {"book_l2": _kalshi_batch_books(r)},
+    ("kalshi", "rec_trades"): lambda r, c: {"trades": kalshi.trades(r)},
     ("polymarket", "gamma_markets"): lambda r, c: {"markets": polymarket.markets(r, c)},
     ("polymarket", "data_trades"): lambda r, c: {"trades": polymarket.trades(r)},
     ("polymarket", "clob_prices"): lambda r, c: {"price_history": polymarket.price_history(r)},
     ("polymarket", "clob_books"): _book(polymarket.book),
+    ("polymarket", "rec_books"): _book(polymarket.book),
+    ("polymarket", "rec_onchain_fills"): lambda r, c: {
+        "trades": polymarket_onchain.recorder_trades(r)
+    },
     ("manifold", "markets"): lambda r, c: {"markets": manifold.markets(r, c)},
     ("manifold", "market_details"): lambda r, c: {"markets": manifold.markets(r, c)},
     ("manifold", "bets"): _manifold_bets,

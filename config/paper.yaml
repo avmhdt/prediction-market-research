@@ -20,10 +20,14 @@ min_days: 28
 # Paper period (owner decision 2026-11-17): 2026-11-15 17:47 to 2026-12-13 17:47 UTC, counted
 # from the first full poll after the 11-12 to 11-15 outage; it must end by 2026-12-15.
 period: {start: "2026-11-15T17:47:03Z", end: "2026-12-13T17:47:03Z", hard_end: "2026-12-15T00:00:00Z"}
-rate_limits_rps: {clob.polymarket.com: 15, gamma-api.polymarket.com: 2, external-api.kalshi.com: 4}
+rate_limits_rps: {clob.polymarket.com: 15, gamma-api.polymarket.com: 2, external-api.kalshi.com: 4, gateway.tenderly.co: 0.5}
 flush_every_cycles: 10           # raw parts are closed every 10 polls (5 minutes)
 disk_check_minutes: 10
 disk_warn_used_pct: 80
 # The drive holding WSL and the repo (moved from failing D: to G: on 2026-11-17); warn below 150 GB.
 host_drive_path: /mnt/g
 host_drive_min_free_gb: 150
+# Recent Polymarket fills for the paper markets, from public Polygon logs (owner decision
+# 2026-11-17, a mid-period deviation): read-only JSON-RPC on the allowed gateway only, never
+# Polymarket's servers. Two requests per poll; taker rows only.
+onchain_fills: {enabled: true, onchain_config: config/onchain.yaml, max_blocks_per_cycle: 500, start_lookback_blocks: 30}

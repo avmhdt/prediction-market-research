@@ -230,7 +230,9 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
                 f"""
                 INSERT INTO trades
                 SELECT t.ts_exchange, t.ts_recv, t.venue, coalesce(t.symbol, m.symbol),
-                       t.trade_id, t.price, t.qty, t.side, t.market_id, t.source, t.notional
+                       t.trade_id, t.price, t.qty, t.side,
+                       coalesce(nullif(t.market_id, ''), ms.market_id, t.symbol),
+                       t.source, t.notional
                 FROM (
                     SELECT *, row_number() OVER (
                         PARTITION BY venue, trade_id
@@ -243,6 +245,10 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
                     SELECT venue, market_id, min(symbol) AS symbol
                     FROM markets WHERE valid_to IS NULL GROUP BY venue, market_id
                 ) m ON t.venue = m.venue AND t.market_id = m.market_id
+                LEFT JOIN (
+                    SELECT venue, symbol, min(market_id) AS market_id
+                    FROM markets WHERE valid_to IS NULL GROUP BY venue, symbol
+                ) ms ON t.venue = ms.venue AND t.symbol = ms.symbol
                 WHERE t.rn = 1
                 ORDER BY t.venue, t.market_id, t.ts_exchange, t.trade_id
                 """

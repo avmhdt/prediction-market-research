@@ -36,6 +36,7 @@ import polars as pl
 import structlog
 
 from pmr.analysis.arb import ArbConfig
+from pmr.collectors.polymarket_onchain import OnchainConfig, pad_address
 from pmr.collectors.raw import RawWriter, record_from_fetch
 from pmr.fees.table import FeeTable
 from pmr.http.client import FetchResult, HttpClient, HttpError
@@ -43,6 +44,7 @@ from pmr.http.ratelimit import RateLimiterRegistry
 from pmr.normalize import kalshi as nk
 from pmr.normalize import polymarket as npm
 from pmr.normalize.categories import CategoryMap
+from pmr.normalize.polymarket_onchain import _fill as oc_fill
 from pmr.paper.config import PaperConfig
 from pmr.paper.market_set import MarketMeta, MarketSet, kalshi_candidates, polymarket_candidates
 from pmr.paper.strategies import ArbMonitor, Cycle, FLBTilt, MMQuotes, TradePrint
@@ -122,6 +124,9 @@ class Recorder:
             ("kalshi", "rec_books"): RawWriter(self.data_dir, "kalshi", "rec_books", 10**9),
             ("kalshi", "rec_trades"): RawWriter(self.data_dir, "kalshi", "rec_trades", 10**9),
             ("polymarket", "rec_books"): RawWriter(self.data_dir, "polymarket", "rec_books", 10**9),
+            ("polymarket", "rec_onchain_fills"): RawWriter(
+                self.data_dir, "polymarket", "rec_onchain_fills", 10**9
+            ),
         }
         self.kalshi_trade_ts: int | None = None
         self.seen_trades: deque[str] = deque(maxlen=50_000)
@@ -417,6 +422,98 @@ class Recorder:
             raise errors[0]
         return books, no_books
 
+    # ------------------------------------------------------------------ on-chain fills
+
+    def _fills_setup(self) -> None:
+        if getattr(self, "_fills_ready", False):
+            return
+        oc = OnchainConfig.load(Path(self.pcfg.onchain_fills.onchain_config))
+        self.fills_url = str(oc["rpc_url"])
+        self.fills_layout = {str(e["address"]).lower(): str(e["layout"]) for e in oc["exchanges"]}
+        topics = sorted({str(e["topic"]) for e in oc["exchanges"]})
+        self.fills_filter = {
+            "address": sorted(self.fills_layout),
+            "topics": [topics, None, None, [pad_address(a) for a in sorted(self.fills_layout)]],
+        }
+        self.fills_block: int | None = None
+        self._fills_ready = True
+
+    async def poll_polymarket_fills(self, members: list[MarketMeta]) -> list[TradePrint]:
+        """Taker fills since the last poll on the paper markets' tokens, as YES trade prints.
+
+        Read-only ``eth_blockNumber`` and ``eth_getLogs`` on the allowed gateway (guarded by
+        :func:`pmr.http.guard.check_jsonrpc`); the raw responses are archived with the token
+        map used. Never touches Polymarket's servers.
+        """
+        cfg = self.pcfg.onchain_fills
+        if not cfg.enabled or not members:
+            return []
+        self._fills_setup()
+        head_res = await self.http.rpc(self.fills_url, "eth_blockNumber", [])
+        head_data = head_res.data if isinstance(head_res.data, dict) else {}
+        head = int(head_data["result"], 16)
+        first = self.fills_block is None
+        if self.fills_block is None:
+            self.fills_block = head - cfg.start_lookback_blocks
+        lo = self.fills_block + 1
+        hi = min(head, lo + cfg.max_blocks_per_cycle - 1)
+        if hi < lo:
+            return []
+        tokens: dict[str, tuple[str, int]] = {}
+        for m in members:
+            tokens[m.symbol] = (m.symbol, 0)
+            if m.no_symbol:
+                tokens[m.no_symbol] = (m.symbol, 1)
+        for _ in range(6):
+            res = await self.http.rpc(
+                self.fills_url,
+                "eth_getLogs",
+                [{**self.fills_filter, "fromBlock": hex(lo), "toBlock": hex(hi)}],
+            )
+            if not (isinstance(res.data, dict) and res.data.get("error")):
+                break
+            if hi <= lo:
+                raise HttpError(f"eth_getLogs failed on block {lo}: {res.data['error']}")
+            hi = lo + (hi - lo) // 2  # result cap: take the lower half now, the rest next poll
+        body = res.data if isinstance(res.data, dict) else {}
+        logs = body.get("result") or []
+        prints: list[TradePrint] = []
+        matched: dict[str, list[Any]] = {}
+        for lg in logs:
+            layout = self.fills_layout.get(str(lg.get("address", "")).lower())
+            if layout is None:
+                continue
+            row = oc_fill(lg, layout, res.ts_recv_ns)
+            if row is None or row["token_id"] not in tokens:
+                continue
+            yes, outcome = tokens[row["token_id"]]
+            matched[row["token_id"]] = [yes, outcome]
+            price = row["price"] if outcome == 0 else 1.0 - row["price"]
+            side = int(row["side"]) if outcome == 0 else -int(row["side"])
+            prints.append(TradePrint("polymarket", yes, int(row["ts"]), price, row["qty"], side))
+        self._store(
+            "polymarket",
+            "rec_onchain_fills",
+            res,
+            {"tokens": matched, "from_block": lo, "to_block": hi},
+        )
+        if first and self.paper:
+            self.ledger.write(
+                [
+                    {
+                        "type": "fills_source",
+                        "ts": self.now_ns(),
+                        "venue": "polymarket",
+                        "source": "onchain",
+                        "from_block": lo,
+                        "note": "owner decision 2026-11-17",
+                    }
+                ]
+            )
+            log.info("polymarket_onchain_fills_started", from_block=lo)
+        self.fills_block = hi
+        return prints
+
     # ------------------------------------------------------------------ cycle
 
     async def cycle(self) -> dict[str, Any]:
@@ -441,6 +538,11 @@ class Recorder:
             b, n = await self.poll_polymarket(pm)
             books.update(b)
             no_books.update(n)
+            try:
+                trades.extend(await self.poll_polymarket_fills(pm))
+            except Exception as exc:  # noqa: BLE001 - fills never block the book poll
+                self.fills_failures = getattr(self, "fills_failures", 0) + 1
+                log.warning("onchain_fills_failed", error=f"{type(exc).__name__}: {exc}")
 
         jobs: dict[str, Any] = {}
         if kal:

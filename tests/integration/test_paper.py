@@ -528,3 +528,117 @@ def test_status_counts_overlapping_gap_rows_once(tmp_path: Path) -> None:
     st = status(tmp_path, pcfg(period=None), now_ns=t + 1000 * NS)
     assert st["uptime_pct"]["kalshi"] == pytest.approx(100 * (1 - 610 / 1000))
     assert st["uptime_pct"]["polymarket"] == 100.0
+
+
+@respx.mock
+async def test_onchain_fills_feed_mm_and_archive(
+    tmp_path: Path, settings: Settings, cfg: PmrConfig
+) -> None:
+    from pmr.collectors.raw import iter_parts, read_part
+    from pmr.normalize.polymarket_onchain import T as TOPICS
+    from pmr.normalize.polymarket_onchain import recorder_trades
+
+    mock_venues()
+    ex2 = "0xe111180000d2663c0091e4f400237545b87b996b"
+
+    def w(*v: int) -> str:
+        return "0x" + "".join(f"{x:064x}" for x in v)
+
+    def lg(token: int, side: int, maker: int, taker: int, n: int) -> dict[str, Any]:
+        return {
+            "address": ex2,
+            "topics": [TOPICS["fill_v2"], "0x1", "0x2", "0x3"],
+            "data": w(side, token, maker, taker, 0, 0, 0),
+            "blockTimestamp": hex(int(T0)),
+            "transactionHash": f"0xt{n}",
+            "logIndex": hex(n),
+        }
+
+    def rpc(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["method"] == "eth_blockNumber":
+            return httpx.Response(200, json={"id": 1, "result": hex(1000)})
+        assert body["method"] == "eth_getLogs"
+        f = body["params"][0]
+        assert f["topics"][3] and int(f["fromBlock"], 16) == 971
+        return httpx.Response(
+            200,
+            json={
+                "id": 1,
+                "result": [
+                    lg(int("1"), 0, 60_000_000, 100_000_000, 1),  # unknown token: ignored
+                ],
+            },
+        )
+
+    route = respx.post("https://gateway.tenderly.co/public/polygon").mock(side_effect=rpc)
+    rec = recorder(tmp_path, settings, cfg, Clock())
+    await rec.cycle()
+    assert route.call_count == 2 and rec.fills_block == 1000
+    # Map the paper market's tokens: YES "y1", NO "n1" are not numeric in the fixture, so
+    # check the mapping logic with numeric tokens directly.
+    rec.set.members["polymarket:y1"] = MarketMeta(
+        **{**rec.set.members["polymarket:y1"].__dict__, "symbol": "11", "no_symbol": "22"}
+    )
+    members = [m for m in rec.set.members.values() if m.venue == "polymarket"]
+
+    def rpc2(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["method"] == "eth_blockNumber":
+            return httpx.Response(200, json={"id": 1, "result": hex(1010)})
+        return httpx.Response(
+            200,
+            json={
+                "id": 1,
+                "result": [
+                    lg(11, 0, 45_000_000, 100_000_000, 2),  # buys YES at 0.45: YES print, side +1
+                    lg(22, 0, 30_000_000, 100_000_000, 3),  # buys NO at 0.30: YES 0.70, side -1
+                ],
+            },
+        )
+
+    respx.post("https://gateway.tenderly.co/public/polygon").mock(side_effect=rpc2)
+    prints = await rec.poll_polymarket_fills(members)
+    assert [(p.symbol, round(p.price, 6), p.side, p.qty) for p in prints] == [
+        ("11", 0.45, 1, 100.0),
+        ("11", 0.7, -1, 100.0),
+    ]
+    for wr in rec.writers.values():
+        wr.flush()
+    recs = [
+        r for p in iter_parts(tmp_path, "polymarket", "rec_onchain_fills") for r in read_part(p)
+    ]
+    rows = [t for r in recs for t in recorder_trades(r)]
+    assert [(t["symbol"], round(t["price"], 6), t["side"]) for t in rows] == [
+        ("11", 0.45, 1),
+        ("11", 0.7, -1),
+    ]
+    events = [
+        json.loads(x)
+        for f in (tmp_path / "paper").glob("paper-*.jsonl")
+        for x in f.read_text().splitlines()
+    ]
+    assert sum(e["type"] == "fills_source" for e in events) == 1
+
+
+def test_kalshi_batch_books_normalizer() -> None:
+    from pmr.normalize.run import _kalshi_batch_books
+
+    rec = {
+        "ts_recv_ns": 5,
+        "body": {
+            "orderbooks": [
+                {
+                    "ticker": "A",
+                    "orderbook_fp": {"yes_dollars": [["0.40", "3"]], "no_dollars": [["0.55", "2"]]},
+                },
+                {"ticker": "B", "orderbook_fp": {}},
+                "junk",
+            ]
+        },
+    }
+    rows = _kalshi_batch_books(rec)
+    assert [(r["symbol"], r["side"], round(r["price"], 6), r["qty"]) for r in rows] == [
+        ("A", 1, 0.4, 3.0),
+        ("A", -1, 0.45, 2.0),
+    ]

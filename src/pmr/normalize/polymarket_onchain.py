@@ -292,3 +292,46 @@ def frames(rows: dict[str, list[dict[str, Any]]]) -> dict[str, pl.DataFrame]:
             schema = SCHEMAS[name]
             out[name] = pl.DataFrame({c: [r.get(c) for r in rs] for c in schema}, schema=schema)
     return out
+
+
+def recorder_trades(rec: dict[str, Any]) -> list[dict[str, Any]]:
+    """YES-oriented ``trades`` rows from one recorder ``rec_onchain_fills`` record.
+
+    The record's key holds the token map used live (``token -> [yes token, outcome]``), so the
+    simulator sees exactly the prints the paper trader saw. ``trade_id`` is ``txhash:logIndex``,
+    the same id the on-chain backfill gives the same fill.
+    """
+    body = rec.get("body") or {}
+    logs = (body.get("result") or []) if isinstance(body, dict) else []
+    tokens = (rec.get("key") or {}).get("tokens") or {}
+    out: list[dict[str, Any]] = []
+    for log in logs:
+        if not isinstance(log, dict):
+            continue
+        topics = [str(t).lower() for t in log.get("topics") or []]
+        if not topics:
+            continue
+        addr = str(log.get("address", "")).lower()
+        layout = (
+            "v1" if topics[0] == T["fill_v1"] else ("v3" if addr.startswith("0xe33337") else "v2")
+        )
+        row = _fill(log, layout, int(rec["ts_recv_ns"]))
+        if row is None or row["token_id"] not in tokens:
+            continue
+        yes, outcome = tokens[row["token_id"]]
+        out.append(
+            {
+                "ts_exchange": row["ts"],
+                "ts_recv": row["ingested_at"],
+                "venue": "polymarket",
+                "symbol": str(yes),
+                "trade_id": row["trade_id"],
+                "price": row["price"] if outcome == 0 else 1.0 - row["price"],
+                "qty": row["qty"],
+                "side": row["side"] if outcome == 0 else -row["side"],
+                "market_id": "",  # filled from the market by symbol in the warehouse
+                "source": "onchain",
+                "notional": row["price"] * row["qty"],
+            }
+        )
+    return out

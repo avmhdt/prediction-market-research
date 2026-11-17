@@ -53,6 +53,16 @@ class PeriodCfg(_M):
     hard_end: str
 
 
+class OnchainFillsCfg(_M):
+    """Recent Polymarket fills for the paper markets from public Polygon logs (owner decision
+    2026-11-17). Exchanges, topics and the gateway come from config/onchain.yaml."""
+
+    enabled: bool = False
+    onchain_config: str = "config/onchain.yaml"
+    max_blocks_per_cycle: int = Field(default=500, ge=1)
+    start_lookback_blocks: int = Field(default=30, ge=0)
+
+
 class PaperConfig(_M):
     """``config/paper.yaml``."""
 
@@ -67,6 +77,7 @@ class PaperConfig(_M):
     disk_warn_used_pct: float = 80.0
     host_drive_path: str = "/mnt/g"  # the Windows drive that holds WSL and the repo
     host_drive_min_free_gb: float = 150.0
+    onchain_fills: OnchainFillsCfg = OnchainFillsCfg()
 
 
 def load_paper_config(path: Path, settings: Settings | None = None) -> PaperConfig:
