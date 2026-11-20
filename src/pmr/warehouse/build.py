@@ -30,7 +30,7 @@ import structlog
 
 from pmr.normalize.categories import CategoryMap
 from pmr.normalize.schema import MARKETS
-from pmr.normalize.store import interim_files, read_interim
+from pmr.normalize.store import interim_files
 from pmr.warehouse import onchain
 
 log = structlog.get_logger("pmr.warehouse")
@@ -62,10 +62,25 @@ def migrations() -> list[Migration]:
     return out
 
 
+MEMORY_LIMIT = "12GB"  # the shared PC stops work below 30 GB free; DuckDB spills beyond this
+
+
+def memory_limit() -> str:
+    """DuckDB memory limit: ``PMR_DUCKDB_MEMORY`` (for example ``8GB``) or :data:`MEMORY_LIMIT`."""
+    v = os.environ.get("PMR_DUCKDB_MEMORY", "").strip().upper()
+    return v if re.fullmatch(r"\d+(\.\d+)?(MB|GB)", v) else MEMORY_LIMIT
+
+
 def _connect(path: Path, threads: int) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(path))
     con.execute(f"SET threads = {int(threads)}")
-    con.execute("SET preserve_insertion_order = true")
+    con.execute(f"SET memory_limit = '{memory_limit()}'")
+    spill = path.parent / "duckdb_spill"
+    spill.mkdir(parents=True, exist_ok=True)
+    con.execute(f"SET temp_directory = '{str(spill).replace(chr(39), chr(39) * 2)}'")
+    # Row order inside tables is irrelevant (checksums are order-independent), and keeping it
+    # costs memory on large inserts.
+    con.execute("SET preserve_insertion_order = false")
     return con
 
 
@@ -87,79 +102,143 @@ def apply_migrations(con: duckdb.DuckDBPyConnection) -> list[int]:
     return applied
 
 
-def version_markets(raw: pl.DataFrame, events: pl.DataFrame, cats: CategoryMap) -> pl.DataFrame:
-    """Collapse market snapshots into Type-2 versions with ``valid_to`` and ``rules_changed``."""
-    if raw.is_empty():
-        return raw.with_columns(
-            pl.lit(None, pl.Int64).alias("valid_to"), pl.lit(False).alias("rules_changed")
+def _sql_str(v: str) -> str:
+    return "'" + v.replace("'", "''") + "'"
+
+
+def version_markets_sql(source: str) -> str:
+    """SQL selecting Type-2 market versions from table ``source`` (MARKETS columns plus
+    ``rules_changed`` and ``valid_to``).
+
+    A lite record is dropped when a full record (with rules text) of the same market exists;
+    duplicate snapshots at the same ``valid_from`` keep one row; consecutive identical versions
+    collapse; ``valid_to`` is the next version's ``valid_from``; ``rules_changed`` flags a
+    version whose rules differ from the first version's (DQ-03).
+    """
+    content = ", ".join(f"coalesce(CAST({c} AS VARCHAR), chr(0))" for c in VERSION_COLS)
+    cols = ", ".join(MARKETS)
+    return f"""
+        WITH fullness AS (
+            SELECT venue, symbol, bool_or(rules_text IS NOT NULL) AS any_full
+            FROM {source} GROUP BY venue, symbol
+        ), f AS (
+            SELECT s.* FROM {source} s JOIN fullness USING (venue, symbol)
+            WHERE NOT any_full OR rules_text IS NOT NULL
+        ), h AS (
+            SELECT *, md5(concat_ws(chr(31), {content})) AS _h FROM f
+        ), d AS (
+            SELECT * FROM h
+            QUALIFY row_number() OVER (PARTITION BY venue, symbol, valid_from ORDER BY _h) = 1
+        ), l AS (
+            SELECT *, lag(_h) OVER (PARTITION BY venue, symbol ORDER BY valid_from) AS _prev
+            FROM d
+        ), k AS (
+            SELECT * FROM l WHERE _prev IS NULL OR _h <> _prev
+        ), v AS (
+            SELECT *,
+                   first_value(rules_hash) OVER (
+                       PARTITION BY venue, symbol ORDER BY valid_from
+                   ) AS _first_rules,
+                   lead(valid_from) OVER (PARTITION BY venue, symbol ORDER BY valid_from)
+                       AS _valid_to
+            FROM k
         )
-    m = raw
-    # Kalshi: series and category from events (event -> series) and series (-> category).
-    if events.height and m.filter(pl.col("venue") == "kalshi").height:
-        ev = (
-            events.filter(pl.col("event_id").is_not_null())
-            .sort("ingested_at")
-            .unique(subset=["venue", "event_id"], keep="last")
-            .select(
-                "venue",
-                "event_id",
-                pl.col("series_id").alias("_ev_series"),
-                pl.col("category_raw").alias("_ev_cat"),
-            )
+        SELECT {cols},
+               coalesce(rules_hash IS NOT NULL AND _first_rules IS NOT NULL
+                        AND rules_hash <> _first_rules, false) AS rules_changed,
+               _valid_to AS valid_to
+        FROM v
+    """
+
+
+DUCK_TYPES = {
+    pl.String: "VARCHAR",
+    pl.Int64: "BIGINT",
+    pl.Int32: "INTEGER",
+    pl.Int8: "TINYINT",
+    pl.Float64: "DOUBLE",
+    pl.Boolean: "BOOLEAN",
+    pl.Date: "DATE",
+}
+
+
+def create_markets_stage(con: duckdb.DuckDBPyConnection, name: str = "m_raw") -> None:
+    """An empty temp table with the MARKETS columns and types."""
+    typed = ", ".join(f"{c} {DUCK_TYPES[type(t)]}" for c, t in MARKETS.items())
+    con.execute(f"CREATE TEMP TABLE {name} ({typed})")
+
+
+def load_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: CategoryMap) -> None:
+    """Stage every market snapshot, enrich and categorize in SQL, insert Type-2 versions."""
+    cols = ", ".join(MARKETS)
+    create_markets_stage(con)
+    files = interim_files(data_dir, "markets")
+    if files:
+        con.execute(
+            f"INSERT INTO m_raw SELECT {cols} FROM read_parquet({_parquet_list(files)}, "
+            "hive_partitioning = false, union_by_name = true)"
         )
-        se = (
-            events.filter(pl.col("event_id").is_null())
-            .sort("ingested_at")
-            .unique(subset=["venue", "series_id"], keep="last")
-            .select("venue", "series_id", pl.col("category_raw").alias("_se_cat"))
+    onchain.stage_markets(con, data_dir, cats)
+    ev_files = interim_files(data_dir, "events")
+    if ev_files:
+        con.execute(
+            f"""
+            INSERT INTO events
+            SELECT DISTINCT venue, event_id, series_id, title, category_raw, ingested_at
+            FROM read_parquet({_parquet_list(ev_files)}, hive_partitioning = false)
+            """
         )
-        m = m.join(ev, on=["venue", "event_id"], how="left")
-        m = m.with_columns(pl.coalesce("series_id", "_ev_series").alias("series_id"))
-        m = m.join(se, on=["venue", "series_id"], how="left")
-        m = m.with_columns(
-            pl.coalesce("category_raw", "_se_cat", "_ev_cat").alias("category_raw")
-        ).drop("_ev_series", "_ev_cat", "_se_cat")
-    m = m.with_columns(
-        pl.struct("venue", "category_raw", "category")
-        .map_elements(
-            lambda s: s["category"] or cats.map(s["venue"], (s["category_raw"] or "").split("|")),
-            return_dtype=pl.String,
-        )
-        .alias("category")
+        # Kalshi: series from the event, category from the series (else the event).
+        for stmt in (
+            """CREATE TEMP TABLE ev_latest AS
+               SELECT venue, event_id, arg_max(series_id, ingested_at) AS series_id,
+                      arg_max(category_raw, ingested_at) AS cat
+               FROM events WHERE event_id IS NOT NULL GROUP BY venue, event_id""",
+            """CREATE TEMP TABLE se_latest AS
+               SELECT venue, series_id, arg_max(category_raw, ingested_at) AS cat
+               FROM events WHERE event_id IS NULL GROUP BY venue, series_id""",
+            """UPDATE m_raw SET series_id = e.series_id FROM ev_latest e
+               WHERE m_raw.venue = 'kalshi' AND m_raw.series_id IS NULL
+                 AND m_raw.venue = e.venue AND m_raw.event_id = e.event_id""",
+            """UPDATE m_raw SET category_raw = s.cat FROM se_latest s
+               WHERE m_raw.venue = 'kalshi' AND m_raw.category_raw IS NULL
+                 AND m_raw.venue = s.venue AND m_raw.series_id = s.series_id""",
+            """UPDATE m_raw SET category_raw = e.cat FROM ev_latest e
+               WHERE m_raw.venue = 'kalshi' AND m_raw.category_raw IS NULL
+                 AND m_raw.venue = e.venue AND m_raw.event_id = e.event_id""",
+        ):
+            con.execute(stmt)
+    categorize(con, "m_raw", cats)
+    con.execute(
+        f"INSERT INTO markets ({cols}, rules_changed, valid_to) " + version_markets_sql("m_raw")
     )
-    # Drop lite records where a full record of the same market exists.
-    has_full = m.group_by("venue", "symbol").agg(
-        pl.col("rules_text").is_not_null().any().alias("_any_full")
+    con.execute("DROP TABLE m_raw")
+
+
+def categorize(con: duckdb.DuckDBPyConnection, table: str, cats: CategoryMap) -> None:
+    """Fill null categories, mapping each distinct (venue, raw labels) once."""
+    labels = con.execute(
+        f"SELECT DISTINCT venue, category_raw FROM {table} WHERE category IS NULL"
+    ).fetchall()
+    if not labels:
+        return
+    mapped = pl.DataFrame(
+        {
+            "venue": [v for v, _ in labels],
+            "category_raw": [r for _, r in labels],
+            "cat": [cats.map(v, (r or "").split("|")) for v, r in labels],
+        },
+        schema={"venue": pl.String, "category_raw": pl.String, "cat": pl.String},
     )
-    m = (
-        m.join(has_full, on=["venue", "symbol"], how="left")
-        .filter(~pl.col("_any_full") | pl.col("rules_text").is_not_null())
-        .drop("_any_full")
+    con.register("cat_map", mapped.to_arrow())
+    con.execute(
+        f"""
+        UPDATE {table} SET category = c.cat FROM cat_map c
+        WHERE {table}.category IS NULL AND {table}.venue = c.venue
+          AND {table}.category_raw IS NOT DISTINCT FROM c.category_raw
+        """
     )
-    m = m.with_columns(
-        pl.concat_str(
-            [pl.col(c).cast(pl.String).fill_null("\x00") for c in VERSION_COLS], separator="\x1f"
-        )
-        .hash(seed=0)
-        .alias("_h")
-    )
-    m = m.sort(["venue", "symbol", "valid_from", "_h"]).unique(
-        subset=["venue", "symbol", "valid_from"], keep="first", maintain_order=True
-    )
-    m = m.with_columns(pl.col("_h").shift(1).over(["venue", "symbol"]).alias("_prev"))
-    m = m.filter(pl.col("_prev").is_null() | (pl.col("_h") != pl.col("_prev")))
-    m = m.with_columns(
-        pl.col("valid_from").shift(-1).over(["venue", "symbol"]).alias("valid_to"),
-        pl.col("rules_hash").first().over(["venue", "symbol"]).alias("_first_rules"),
-    )
-    m = m.with_columns(
-        (
-            pl.col("rules_hash").is_not_null()
-            & pl.col("_first_rules").is_not_null()
-            & (pl.col("rules_hash") != pl.col("_first_rules"))
-        ).alias("rules_changed")
-    ).drop("_h", "_prev", "_first_rules")
-    return m.sort(["venue", "symbol", "valid_from"])
+    con.unregister("cat_map")
 
 
 def _parquet_list(files: list[Path]) -> str:
@@ -189,32 +268,7 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
         for mig in migrations():
             con.execute(mig.path.read_text(encoding="utf-8"))
 
-        events = read_interim(data_dir, "events")
-        oc_tables = {
-            name: read_interim(data_dir, name)
-            for name in ("oc_conditions", "oc_resolutions", "oc_questions", "oc_tokens")
-        }
-        oc_markets, tmap = onchain.markets(oc_tables, cats)
-        if tmap.height:
-            checked, bad = onchain.check_tokens(tmap, oc_tables["oc_tokens"])
-            log.info("onchain_token_check", conditions=checked, mismatches=bad)
-        raw_markets = read_interim(data_dir, "markets")
-        if oc_markets.height:
-            raw_markets = pl.concat([raw_markets, oc_markets], how="vertical")
-        markets = version_markets(raw_markets, events, cats)
-        cols = [*MARKETS.keys(), "rules_changed", "valid_to"]
-        con.register("m_df", markets.select(cols).to_arrow())
-        con.execute(f"INSERT INTO markets ({', '.join(cols)}) SELECT {', '.join(cols)} FROM m_df")
-        con.unregister("m_df")
-        if events.height:
-            con.register(
-                "e_df",
-                events.unique()
-                .sort(["venue", "event_id", "series_id", "ingested_at"], nulls_last=True)
-                .to_arrow(),
-            )
-            con.execute("INSERT INTO events SELECT * FROM e_df")
-            con.unregister("e_df")
+        load_markets(con, data_dir, cats)
 
         files = interim_files(data_dir, "trades")
         if files:
@@ -222,7 +276,9 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
                 f"""
                 INSERT INTO trades
                 SELECT t.ts_exchange, t.ts_recv, t.venue, coalesce(t.symbol, m.symbol),
-                       t.trade_id, t.price, t.qty, t.side, t.market_id, t.source, t.notional
+                       t.trade_id, t.price, t.qty, t.side,
+                       coalesce(nullif(t.market_id, ''), ms.market_id, t.symbol),
+                       t.source, t.notional
                 FROM (
                     SELECT *, row_number() OVER (
                         PARTITION BY venue, trade_id
@@ -235,8 +291,11 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
                     SELECT venue, market_id, min(symbol) AS symbol
                     FROM markets WHERE valid_to IS NULL GROUP BY venue, market_id
                 ) m ON t.venue = m.venue AND t.market_id = m.market_id
+                LEFT JOIN (
+                    SELECT venue, symbol, min(market_id) AS market_id
+                    FROM markets WHERE valid_to IS NULL GROUP BY venue, symbol
+                ) ms ON t.venue = ms.venue AND t.symbol = ms.symbol
                 WHERE t.rn = 1
-                ORDER BY t.venue, t.market_id, t.ts_exchange, t.trade_id
                 """
             )
         files = interim_files(data_dir, "oc_fills")
@@ -244,7 +303,6 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
             onchain.insert_trades(
                 con,
                 f"SELECT * FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)",
-                tmap,
             )
         files = interim_files(data_dir, "price_history")
         if files:
@@ -262,7 +320,6 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
                     WHERE ts IS NOT NULL AND symbol IS NOT NULL
                 )
                 WHERE rn = 1
-                ORDER BY venue, symbol, interval_s, ts
                 """
             )
         files = interim_files(data_dir, "book_l2")
@@ -275,7 +332,6 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
                        side, price, qty, is_snapshot
                 FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
                 WHERE symbol IS NOT NULL
-                ORDER BY venue, symbol, ts_recv, side, price
                 """
             )
         files = interim_files(data_dir, "risk_free")
