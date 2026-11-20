@@ -211,7 +211,7 @@ def _versions(rows: list[dict[str, Any]]) -> pl.DataFrame:
         con.register("src_df", frame("markets", rows).to_arrow())
         con.execute("INSERT INTO m_raw SELECT * FROM src_df")
     categorize(con, "m_raw", CATS)
-    out = pl.from_arrow(con.execute(version_markets_sql("m_raw")).to_arrow_table())
+    out = pl.from_arrow(con.execute(version_markets_sql(con, "m_raw")).to_arrow_table())
     con.close()
     assert isinstance(out, pl.DataFrame)
     return out

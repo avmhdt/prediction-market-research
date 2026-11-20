@@ -106,7 +106,7 @@ def _sql_str(v: str) -> str:
     return "'" + v.replace("'", "''") + "'"
 
 
-def version_markets_sql(source: str) -> str:
+def version_markets_sql(con: duckdb.DuckDBPyConnection, source: str) -> str:
     """SQL selecting Type-2 market versions from table ``source`` (MARKETS columns plus
     ``rules_changed`` and ``valid_to``).
 
@@ -114,40 +114,61 @@ def version_markets_sql(source: str) -> str:
     duplicate snapshots at the same ``valid_from`` keep one row; consecutive identical versions
     collapse; ``valid_to`` is the next version's ``valid_from``; ``rules_changed`` flags a
     version whose rules differ from the first version's (DQ-03).
+
+    The window work runs on a narrow key table (row id, market, time, content hash) staged here
+    as ``_vk``; the returned SQL joins the kept rows back to ``source``. Windows over the full
+    rows (rules text included) did not fit the memory limit on the full data.
     """
     content = ", ".join(f"coalesce(CAST({c} AS VARCHAR), chr(0))" for c in VERSION_COLS)
-    cols = ", ".join(MARKETS)
-    return f"""
+    cols = ", ".join(f"s.{c}" for c in MARKETS)
+    con.execute(
+        f"""
+        CREATE OR REPLACE TABLE _vk0 AS
+        SELECT rowid AS rid, venue, symbol, valid_from, rules_hash,
+               rules_text IS NOT NULL AS has_rules,
+               md5_number(concat_ws(chr(31), {content})) AS h
+        FROM {source}
+        """
+    )
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE _vk AS
         WITH fullness AS (
-            SELECT venue, symbol, bool_or(rules_text IS NOT NULL) AS any_full
-            FROM {source} GROUP BY venue, symbol
+            SELECT venue, symbol, bool_or(has_rules) AS any_full
+            FROM _vk0 GROUP BY venue, symbol
         ), f AS (
-            SELECT s.* FROM {source} s JOIN fullness USING (venue, symbol)
-            WHERE NOT any_full OR rules_text IS NOT NULL
-        ), h AS (
-            SELECT *, md5(concat_ws(chr(31), {content})) AS _h FROM f
+            SELECT k.* FROM _vk0 k JOIN fullness USING (venue, symbol)
+            WHERE NOT any_full OR has_rules
         ), d AS (
-            SELECT * FROM h
-            QUALIFY row_number() OVER (PARTITION BY venue, symbol, valid_from ORDER BY _h) = 1
+            SELECT * FROM f
+            QUALIFY row_number() OVER (
+                PARTITION BY venue, symbol, valid_from ORDER BY h, rid
+            ) = 1
         ), l AS (
-            SELECT *, lag(_h) OVER (PARTITION BY venue, symbol ORDER BY valid_from) AS _prev
+            SELECT *, lag(h) OVER (PARTITION BY venue, symbol ORDER BY valid_from) AS prev
             FROM d
         ), k AS (
-            SELECT * FROM l WHERE _prev IS NULL OR _h <> _prev
+            SELECT * FROM l WHERE prev IS NULL OR h <> prev
         ), v AS (
-            SELECT *,
+            SELECT rid, rules_hash,
                    first_value(rules_hash) OVER (
                        PARTITION BY venue, symbol ORDER BY valid_from
-                   ) AS _first_rules,
+                   ) AS first_rules,
                    lead(valid_from) OVER (PARTITION BY venue, symbol ORDER BY valid_from)
-                       AS _valid_to
+                       AS valid_to
             FROM k
         )
-        SELECT {cols},
-               coalesce(rules_hash IS NOT NULL AND _first_rules IS NOT NULL
-                        AND rules_hash <> _first_rules, false) AS rules_changed,
-               _valid_to AS valid_to
+        SELECT rid,
+               coalesce(rules_hash IS NOT NULL AND first_rules IS NOT NULL
+                        AND rules_hash <> first_rules, false) AS rules_changed,
+               valid_to
         FROM v
+        """
+    )
+    con.execute("DROP TABLE _vk0")
+    return f"""
+        SELECT {cols}, k.rules_changed, k.valid_to
+        FROM _vk k JOIN {source} s ON s.rowid = k.rid
     """
 
 
@@ -163,9 +184,9 @@ DUCK_TYPES = {
 
 
 def create_markets_stage(con: duckdb.DuckDBPyConnection, name: str = "m_raw") -> None:
-    """An empty temp table with the MARKETS columns and types."""
+    """An empty staging table with the MARKETS columns and types (on disk, dropped after use)."""
     typed = ", ".join(f"{c} {DUCK_TYPES[type(t)]}" for c, t in MARKETS.items())
-    con.execute(f"CREATE TEMP TABLE {name} ({typed})")
+    con.execute(f"CREATE OR REPLACE TABLE {name} ({typed})")
 
 
 def load_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: CategoryMap) -> None:
@@ -210,8 +231,10 @@ def load_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: CategoryM
             con.execute(stmt)
     categorize(con, "m_raw", cats)
     con.execute(
-        f"INSERT INTO markets ({cols}, rules_changed, valid_to) " + version_markets_sql("m_raw")
+        f"INSERT INTO markets ({cols}, rules_changed, valid_to) "
+        + version_markets_sql(con, "m_raw")
     )
+    con.execute("DROP TABLE _vk")
     con.execute("DROP TABLE m_raw")
 
 
