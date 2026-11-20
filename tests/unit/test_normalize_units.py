@@ -12,7 +12,7 @@ from hypothesis import strategies as st
 from pmr.normalize import kalshi, manifold, polymarket
 from pmr.normalize.categories import CategoryMap, load
 from pmr.normalize.util import fnum, iso_ns, json_list, rules_hash, stable_id, unix_ms_ns, unix_s_ns
-from pmr.warehouse.build import version_markets
+from pmr.warehouse.build import categorize, create_markets_stage, version_markets_sql
 from tests.conftest import REPO
 
 CATS = load(str(REPO / "config" / "categories.yaml"))
@@ -200,9 +200,24 @@ def _m(symbol: str, valid_from: int, rules: str | None, title: str = "t") -> dic
     return row
 
 
-def test_versioning_collapses_drops_lite_and_flags_rule_changes() -> None:
-    from pmr.normalize.schema import MARKETS, frame
+def _versions(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    import duckdb
 
+    from pmr.normalize.schema import frame
+
+    con = duckdb.connect()
+    create_markets_stage(con)
+    if rows:
+        con.register("src_df", frame("markets", rows).to_arrow())
+        con.execute("INSERT INTO m_raw SELECT * FROM src_df")
+    categorize(con, "m_raw", CATS)
+    out = pl.from_arrow(con.execute(version_markets_sql("m_raw")).to_arrow_table())
+    con.close()
+    assert isinstance(out, pl.DataFrame)
+    return out
+
+
+def test_versioning_collapses_drops_lite_and_flags_rule_changes() -> None:
     rows = [
         _m("a", 1, None),  # lite: dropped because a full record exists
         _m("a", 2, "rules v1"),
@@ -210,11 +225,13 @@ def test_versioning_collapses_drops_lite_and_flags_rule_changes() -> None:
         _m("a", 4, "rules v2"),  # rules change after listing (DQ-03)
         _m("b", 1, None),  # only lite records: kept
     ]
-    out = version_markets(frame("markets", rows), pl.DataFrame(schema=MARKETS), CATS)
+    rows[4]["category"] = None  # filled by the category map
+    out = _versions(rows)
     a = out.filter(pl.col("symbol") == "a").sort("valid_from")
     assert a["valid_from"].to_list() == [2, 4]
     assert a["valid_to"].to_list() == [4, None]
     assert a["rules_changed"].to_list() == [False, True]
-    assert out.filter(pl.col("symbol") == "b").height == 1
-    empty = version_markets(frame("markets", []), pl.DataFrame(schema=MARKETS), CATS)
+    b = out.filter(pl.col("symbol") == "b")
+    assert b.height == 1 and b["category"][0] == "other"
+    empty = _versions([])
     assert empty.is_empty() and "valid_to" in empty.columns

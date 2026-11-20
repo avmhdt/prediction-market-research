@@ -16,6 +16,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
+
 from pmr.collectors.base import (
     CollectContext,
     CollectorError,
@@ -26,7 +28,10 @@ from pmr.collectors.base import (
     mark_done,
     to_unix,
 )
+from pmr.http.client import HttpError
 from pmr.settings import PmrConfig
+
+log = structlog.get_logger("pmr.kalshi")
 
 VENUE = "kalshi"
 WHAT = ("series", "events", "markets", "historical", "trades", "candles", "books")
@@ -207,18 +212,32 @@ class KalshiCollector:
                 stats.units_skipped += 1
                 continue
             historical = settled and cut is not None and close_ts < cut
+            if not historical and not series:
+                # The live endpoint needs the series ticker; without it the URL is malformed.
+                mark_done(stream, ticker)
+                stats.units_skipped += 1
+                continue
             url = (
                 f"{self.base}/historical/markets/{ticker}/candlesticks"
                 if historical
                 else f"{self.base}/series/{series}/markets/{ticker}/candlesticks"
             )
             start = open_ts
+            rejected = False
             while start < close_ts:
                 end = min(close_ts, start + step)
-                res = await self.ctx.http.get(
-                    url,
-                    {"start_ts": start, "end_ts": end, "period_interval": CANDLE_PERIOD_MIN},
-                )
+                try:
+                    res = await self.ctx.http.get(
+                        url,
+                        {"start_ts": start, "end_ts": end, "period_interval": CANDLE_PERIOD_MIN},
+                    )
+                except HttpError as exc:
+                    if exc.status not in (400, 404):
+                        raise
+                    # One market the venue will not serve must not stop the whole run.
+                    log.warning("kalshi_candles_rejected", ticker=ticker, status=exc.status)
+                    rejected = True
+                    break
                 stats.pages += 1
                 stats.items += _count("candlesticks")(res.data)
                 stream.put(
@@ -227,7 +246,10 @@ class KalshiCollector:
                 )
                 start = end
             mark_done(stream, ticker)
-            stats.units_done += 1
+            if rejected:
+                stats.units_skipped += 1
+            else:
+                stats.units_done += 1
         stream.commit()
 
     async def books(self, tickers: Sequence[str], stats: IngestStats) -> None:
