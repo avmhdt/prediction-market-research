@@ -222,16 +222,27 @@ def check_tokens(tmap: pl.DataFrame, registered: pl.DataFrame) -> tuple[int, int
     return j.height, bad
 
 
-def insert_trades(con: duckdb.DuckDBPyConnection, fills_sql: str) -> None:
-    """Insert on-chain fills (``fills_sql`` selects ``oc_fills`` rows) as YES trades, using
-    the ``oc_tmap`` token map staged by :func:`stage_markets`."""
+def ensure_token_map(con: duckdb.DuckDBPyConnection, data_dir: Path) -> None:
+    """Make sure ``oc_tmap`` exists (a resumed build reloads it from the cache)."""
     has = con.execute(
         "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'oc_tmap'"
     ).fetchone()
-    if not has or not has[0]:
+    if has and has[0]:
         return
-    con.execute(
-        f"""
+    cache = Path(data_dir) / "processed" / "oc_token_map.parquet"
+    if cache.exists():
+        path = str(cache).replace("'", "''")
+        con.execute(f"CREATE TEMP TABLE oc_tmap AS SELECT * FROM read_parquet('{path}')")
+    else:
+        con.execute(
+            "CREATE TEMP TABLE oc_tmap (token_id VARCHAR, condition_id VARCHAR, outcome TINYINT)"
+        )
+
+
+def insert_trades_sql(fills_sql: str) -> str:
+    """SQL inserting on-chain fills (``fills_sql`` selects ``oc_fills`` rows) as YES trades,
+    using the ``oc_tmap`` token map; a fill already in ``trades`` is not inserted twice."""
+    return f"""
         INSERT INTO trades
         SELECT f.ts, f.ingested_at, 'polymarket', y.token_id, f.trade_id,
                CASE WHEN m.outcome = 0 THEN f.price ELSE 1 - f.price END,
@@ -249,4 +260,13 @@ def insert_trades(con: duckdb.DuckDBPyConnection, fills_sql: str) -> None:
               SELECT 1 FROM trades t WHERE t.venue = 'polymarket' AND t.trade_id = f.trade_id
           )
         """
-    )
+
+
+def insert_trades(con: duckdb.DuckDBPyConnection, fills_sql: str) -> None:
+    """Insert on-chain fills as YES trades (see :func:`insert_trades_sql`)."""
+    has = con.execute(
+        "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'oc_tmap'"
+    ).fetchone()
+    if not has or not has[0]:
+        return
+    con.execute(insert_trades_sql(fills_sql))

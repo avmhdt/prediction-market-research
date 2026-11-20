@@ -1,9 +1,10 @@
 """DuckDB warehouse: build from interim Parquet, migrate, stats and checksums (FR-10, AC-W-04).
 
-``build`` always starts from an empty file (written to ``*.tmp`` and renamed), applies
-``ddl.sql`` and every ``migrations/NNN_*.sql``, loads the interim datasets and creates the
-views. The result depends only on the interim files, which depend only on the raw archive, so
-two builds give identical per-table checksums.
+``build`` starts from an empty file (written to ``*.tmp`` and renamed), applies ``ddl.sql``
+and every ``migrations/NNN_*.sql``, loads the interim datasets and creates the views; a build
+that was stopped resumes from its last committed step when the interim files are unchanged.
+The result depends only on the interim files, which depend only on the raw archive, so two
+builds give identical per-table checksums.
 
 Loading rules:
 
@@ -19,6 +20,8 @@ Loading rules:
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -278,88 +281,180 @@ class BuildResult:
     rows: dict[str, int]
 
 
+# Large window steps run in hash buckets of their partition key so each fits the memory limit.
+BUCKETS = {"trades": 16, "oc_trades": 4, "price_history": 4, "book_l2": 8}
+
+
+def inputs_fingerprint(data_dir: Path) -> str:
+    """Hash of the interim file list (paths and sizes); a resumed build needs the same inputs."""
+    h = hashlib.sha256()
+    root = Path(data_dir) / "interim"
+    if root.exists():
+        for f in sorted(root.rglob("*.parquet")):
+            h.update(f"{f.relative_to(root).as_posix()}:{f.stat().st_size}\n".encode())
+    return h.hexdigest()
+
+
+def _open_build(tmp: Path, threads: int, fp: str) -> tuple[duckdb.DuckDBPyConnection, bool]:
+    """Open ``tmp``; resume it when it holds a build of the same inputs, else start empty."""
+    if tmp.exists():
+        con = _connect(tmp, threads)
+        row = None
+        with contextlib.suppress(duckdb.Error):
+            row = con.execute("SELECT fingerprint FROM _build_meta").fetchone()
+        if row and row[0] == fp:
+            return con, True
+        con.close()
+    for f in (tmp, Path(str(tmp) + ".wal")):
+        if f.exists():
+            f.unlink()
+    con = _connect(tmp, threads)
+    con.execute(DDL.read_text(encoding="utf-8"))
+    for mig in migrations():
+        con.execute(mig.path.read_text(encoding="utf-8"))
+    con.execute("CREATE TABLE _build_steps (step VARCHAR PRIMARY KEY, done_at TIMESTAMP)")
+    con.execute("CREATE TABLE _build_meta (fingerprint VARCHAR)")
+    con.execute("INSERT INTO _build_meta VALUES (?)", [fp])
+    return con, False
+
+
+def _done(con: duckdb.DuckDBPyConnection, step: str) -> bool:
+    row = con.execute("SELECT count(*) FROM _build_steps WHERE step = ?", [step]).fetchone()
+    return bool(row and row[0])
+
+
+def _step(con: duckdb.DuckDBPyConnection, step: str, *sql: str) -> None:
+    """Run ``sql`` and record ``step`` in one transaction (skipped when already recorded)."""
+    if _done(con, step):
+        return
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for q in sql:
+            con.execute(q)
+        con.execute("INSERT INTO _build_steps VALUES (?, now())", [step])
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    log.info("warehouse_step", step=step)
+
+
+def _bucket(col: str, b: int, n: int) -> str:
+    return f"hash({col}) % {int(n)} = {int(b)}"
+
+
 def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) -> BuildResult:
-    """Rebuild the warehouse at ``path`` from ``<data_dir>/interim``."""
+    """Build the warehouse at ``path`` from ``<data_dir>/interim``.
+
+    Work goes to ``*.tmp`` and is renamed at the end. Each step (and each hash bucket of a
+    large step) commits with a record in ``_build_steps``; a build stopped part way (for
+    example by the shared-PC memory watchdog) resumes from the last committed step when the
+    interim files are unchanged, and starts over otherwise.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    for p in (tmp, Path(str(tmp) + ".wal")):
-        if p.exists():
-            p.unlink()
-    con = _connect(tmp, threads)
+    con, resumed = _open_build(tmp, threads, inputs_fingerprint(data_dir))
+    if resumed:
+        done = [r[0] for r in con.execute("SELECT step FROM _build_steps").fetchall()]
+        log.info("warehouse_resume", done=sorted(done))
     try:
-        con.execute(DDL.read_text(encoding="utf-8"))
-        for mig in migrations():
-            con.execute(mig.path.read_text(encoding="utf-8"))
-
-        load_markets(con, data_dir, cats)
+        if not _done(con, "markets"):
+            con.execute("DELETE FROM markets")
+            con.execute("DELETE FROM events")
+            load_markets(con, data_dir, cats)
+            _step(con, "markets")
 
         files = interim_files(data_dir, "trades")
         if files:
-            con.execute(
-                f"""
-                INSERT INTO trades
-                SELECT t.ts_exchange, t.ts_recv, t.venue, coalesce(t.symbol, m.symbol),
-                       t.trade_id, t.price, t.qty, t.side,
-                       coalesce(nullif(t.market_id, ''), ms.market_id, t.symbol),
-                       t.source, t.notional
-                FROM (
-                    SELECT *, row_number() OVER (
-                        PARTITION BY venue, trade_id
-                        ORDER BY {SOURCE_RANK}, ts_recv, ts_exchange, price, qty
-                    ) AS rn
-                    FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
-                    WHERE ts_exchange IS NOT NULL AND price BETWEEN 0 AND 1
-                ) t
-                LEFT JOIN (
-                    SELECT venue, market_id, min(symbol) AS symbol
-                    FROM markets WHERE valid_to IS NULL GROUP BY venue, market_id
-                ) m ON t.venue = m.venue AND t.market_id = m.market_id
-                LEFT JOIN (
-                    SELECT venue, symbol, min(market_id) AS market_id
-                    FROM markets WHERE valid_to IS NULL GROUP BY venue, symbol
-                ) ms ON t.venue = ms.venue AND t.symbol = ms.symbol
-                WHERE t.rn = 1
-                """
-            )
+            n = BUCKETS["trades"]
+            for b in range(n):
+                _step(
+                    con,
+                    f"trades:{b}/{n}",
+                    f"""
+                    INSERT INTO trades
+                    SELECT t.ts_exchange, t.ts_recv, t.venue, coalesce(t.symbol, m.symbol),
+                           t.trade_id, t.price, t.qty, t.side,
+                           coalesce(nullif(t.market_id, ''), ms.market_id, t.symbol),
+                           t.source, t.notional
+                    FROM (
+                        SELECT *, row_number() OVER (
+                            PARTITION BY venue, trade_id
+                            ORDER BY {SOURCE_RANK}, ts_recv, ts_exchange, price, qty
+                        ) AS rn
+                        FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
+                        WHERE ts_exchange IS NOT NULL AND price BETWEEN 0 AND 1
+                          AND {_bucket("trade_id", b, n)}
+                    ) t
+                    LEFT JOIN (
+                        SELECT venue, market_id, min(symbol) AS symbol
+                        FROM markets WHERE valid_to IS NULL GROUP BY venue, market_id
+                    ) m ON t.venue = m.venue AND t.market_id = m.market_id
+                    LEFT JOIN (
+                        SELECT venue, symbol, min(market_id) AS market_id
+                        FROM markets WHERE valid_to IS NULL GROUP BY venue, symbol
+                    ) ms ON t.venue = ms.venue AND t.symbol = ms.symbol
+                    WHERE t.rn = 1
+                    """,
+                )
         files = interim_files(data_dir, "oc_fills")
         if files:
-            onchain.insert_trades(
-                con,
-                f"SELECT * FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)",
-            )
+            onchain.ensure_token_map(con, data_dir)
+            n = BUCKETS["oc_trades"]
+            src = f"SELECT * FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)"
+            for b in range(n):
+                _step(
+                    con,
+                    f"oc_trades:{b}/{n}",
+                    onchain.insert_trades_sql(
+                        f"SELECT * FROM ({src}) WHERE {_bucket('trade_id', b, n)}"
+                    ),
+                )
         files = interim_files(data_dir, "price_history")
         if files:
-            con.execute(
-                f"""
-                INSERT INTO price_history
-                SELECT venue, symbol, ts, interval_s, open, high, low, close, yes_bid_close,
-                       yes_ask_close, volume, open_interest, n_forecasters
-                FROM (
-                    SELECT *, row_number() OVER (
-                        PARTITION BY venue, symbol, ts, interval_s
-                        ORDER BY ingested_at DESC, close
-                    ) AS rn
-                    FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
-                    WHERE ts IS NOT NULL AND symbol IS NOT NULL
+            n = BUCKETS["price_history"]
+            for b in range(n):
+                _step(
+                    con,
+                    f"price_history:{b}/{n}",
+                    f"""
+                    INSERT INTO price_history
+                    SELECT venue, symbol, ts, interval_s, open, high, low, close, yes_bid_close,
+                           yes_ask_close, volume, open_interest, n_forecasters
+                    FROM (
+                        SELECT *, row_number() OVER (
+                            PARTITION BY venue, symbol, ts, interval_s
+                            ORDER BY ingested_at DESC, close
+                        ) AS rn
+                        FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
+                        WHERE ts IS NOT NULL AND symbol IS NOT NULL
+                          AND {_bucket("symbol", b, n)}
+                    )
+                    WHERE rn = 1
+                    """,
                 )
-                WHERE rn = 1
-                """
-            )
         files = interim_files(data_dir, "book_l2")
         if files:
-            con.execute(
-                f"""
-                INSERT INTO book_l2
-                SELECT ts_exchange, ts_recv, venue, symbol,
-                       dense_rank() OVER (PARTITION BY venue, symbol ORDER BY ts_recv) AS seq,
-                       side, price, qty, is_snapshot
-                FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
-                WHERE symbol IS NOT NULL
-                """
-            )
+            n = BUCKETS["book_l2"]
+            for b in range(n):
+                _step(
+                    con,
+                    f"book_l2:{b}/{n}",
+                    f"""
+                    INSERT INTO book_l2
+                    SELECT ts_exchange, ts_recv, venue, symbol,
+                           dense_rank() OVER (PARTITION BY venue, symbol ORDER BY ts_recv)
+                               AS seq,
+                           side, price, qty, is_snapshot
+                    FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
+                    WHERE symbol IS NOT NULL AND {_bucket("symbol", b, n)}
+                    """,
+                )
         files = interim_files(data_dir, "risk_free")
         if files:
-            con.execute(
+            _step(
+                con,
+                "risk_free",
                 f"""
                 INSERT INTO risk_free
                 SELECT "date", series, rate_pct FROM (
@@ -367,10 +462,12 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
                         PARTITION BY series, "date" ORDER BY ingested_at DESC, rate_pct
                     ) AS rn
                     FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
-                ) WHERE rn = 1 ORDER BY series, "date"
-                """
+                ) WHERE rn = 1
+                """,
             )
         con.execute(VIEWS.read_text(encoding="utf-8"))
+        con.execute("DROP TABLE _build_steps")
+        con.execute("DROP TABLE _build_meta")
         rows = table_counts(con)
         con.execute("CHECKPOINT")
     finally:
