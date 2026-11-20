@@ -15,7 +15,8 @@ from pmr.collectors.base import CollectorError
 from pmr.normalize import categories
 from pmr.normalize.run import run as normalize
 from pmr.settings import PmrConfig, Settings
-from pmr.warehouse.build import build
+from pmr.warehouse import build as build_mod
+from pmr.warehouse.build import build, checksums
 from pmr.warehouse.inventory import inventory
 from tests.conftest import REPO
 from tests.fixtures import synth
@@ -37,7 +38,7 @@ def fast(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @respx.mock
 async def test_runners_build_and_inventory(
-    tmp_path: Path, cfg: PmrConfig, settings: Settings
+    tmp_path: Path, cfg: PmrConfig, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     lo = date(2023, 1, 1)
     mock_gamma()
@@ -105,6 +106,26 @@ async def test_runners_build_and_inventory(
     assert "DTB3" not in md  # counts only, no series values
     strict = inventory(wh, tmp_path, since=lo, until=None, min_trades=5, min_notional=100.0)
     assert strict.eligible_total == 0
+
+    # A build stopped part way resumes from its committed steps and gives the same tables.
+    first = checksums(wh)
+    real_step = build_mod._step
+    calls: list[str] = []
+
+    def stop_after_two(con: object, step: str, *sql: str) -> None:
+        calls.append(step)
+        if len(calls) > 2:
+            raise RuntimeError("stopped")
+        real_step(con, step, *sql)  # type: ignore[arg-type]
+
+    wh2 = tmp_path / "w2.duckdb"
+    monkeypatch.setattr(build_mod, "_step", stop_after_two)
+    with pytest.raises(RuntimeError):
+        build(tmp_path, wh2, cats(), threads=1)
+    assert (tmp_path / "w2.duckdb.tmp").exists() and not wh2.exists()
+    monkeypatch.setattr(build_mod, "_step", real_step)
+    build(tmp_path, wh2, cats(), threads=1)
+    assert checksums(wh2) == first
 
 
 @respx.mock
