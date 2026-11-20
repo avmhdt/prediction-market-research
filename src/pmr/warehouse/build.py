@@ -62,13 +62,19 @@ def migrations() -> list[Migration]:
     return out
 
 
-MEMORY_LIMIT = "20GB"  # the shared PC stops work below 30 GB free; DuckDB spills beyond this
+MEMORY_LIMIT = "12GB"  # the shared PC stops work below 30 GB free; DuckDB spills beyond this
+
+
+def memory_limit() -> str:
+    """DuckDB memory limit: ``PMR_DUCKDB_MEMORY`` (for example ``8GB``) or :data:`MEMORY_LIMIT`."""
+    v = os.environ.get("PMR_DUCKDB_MEMORY", "").strip().upper()
+    return v if re.fullmatch(r"\d+(\.\d+)?(MB|GB)", v) else MEMORY_LIMIT
 
 
 def _connect(path: Path, threads: int) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(path))
     con.execute(f"SET threads = {int(threads)}")
-    con.execute(f"SET memory_limit = '{MEMORY_LIMIT}'")
+    con.execute(f"SET memory_limit = '{memory_limit()}'")
     spill = path.parent / "duckdb_spill"
     spill.mkdir(parents=True, exist_ok=True)
     con.execute(f"SET temp_directory = '{str(spill).replace(chr(39), chr(39) * 2)}'")
