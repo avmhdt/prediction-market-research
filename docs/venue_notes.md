@@ -24,14 +24,38 @@ reported, never reached another way.
 | Metaculus | `https://www.metaculus.com/api` | `Authorization: Token <token>` on every endpoint | 2 req/s | skipped (no token yet); 403 without a token | no country rules found |
 | FRED DTB3 | `https://fred.stlouisfed.org/graph/fredgraph.csv?id=DTB3` | none | 1 req/s | 200 | public |
 
-### The owner's network does not geolocate to KY
+### Current location: Brazil (re-checked 2026-11-10)
 
-Polymarket's public geoblock check (`GET https://polymarket.com/api/geoblock`) returned
-`blocked: true` with country **BR** for this PC on 2026-11-09. The smoke test keeps only the
-flag and the country, never the IP. Brazil is on Polymarket's close-only list, which governs
-order placement; every public read still returned 200, and this project never places orders.
-The owner should confirm that no VPN or proxy is active on this PC, since the project's rules
-and Polymarket's terms (section 4.2) forbid using one.
+The owner's residence is KY, but the owner and this PC are in Brazil with no VPN, and the
+network geolocates to BR (Polymarket's geoblock check: `blocked: true`, country BR). Everything
+that depends on where traffic comes from is judged for BR. Sources were read on 2026-11-10;
+this is a reading for the owner, not legal advice.
+
+| Source | BR status for this project's use (public, read-only, no account) |
+|---|---|
+| Polymarket | **Owner decision of 2026-11-10: history from public Polygon on-chain data only; live public reads only for the paper run's order books.** The ToS (effective 2026-08-11) applies restrictions to people "located in" a Restricted Jurisdiction, not only residents, and such users "are only permitted to use the Content Features" (informational features). It does not say whether unauthenticated API reads count. The docs geoblock page lists BR as close-only (no new positions); the help centre (<https://help.polymarket.com/en/articles/13364163-geographic-restrictions>, updated 2026-10-29) lists BR among countries "completely restricted from accessing Polymarket", while saying some restricted users "can view markets and data". Public reads return 200 from here. |
+| Kalshi | Reading is not restricted by location. Brazil is not named in the restricted lists that could be read (an older Member Agreement copy; the Klear member agreement of 2026-06-22); their catch-all covers places where *trading* is illegal, which now likely includes Brazil. The Developer Agreement and Data Terms have no location clause; the storage restriction above is unchanged. The current Member Agreement could not be read (HTTP 429). |
+| Manifold | No BR restriction; play money; the public API is allowed. Prize-drawing exclusions do not name Brazil and do not concern data access. |
+| Metaculus | No BR-specific clause found (the terms page answered 403 to automated reads). |
+| FRED, Dune | No BR restriction (FRED restricts only US-embargoed countries). |
+
+Brazilian rules found on official sites:
+
+- CMN Resolution 5.298 (24 Apr 2026, in force 4 May 2026) bans offering and trading, in Brazil,
+  derivatives on sports, political, electoral, social, cultural and entertainment events,
+  including offers in Brazil of contracts traded abroad
+  (<https://www.bcb.gov.br/estabilidadefinanceira/exibenormativo?tipo=Resolu%C3%A7%C3%A3o%20CMN&numero=5298>).
+- Finance Ministry technical note SEI 2958/2026 (23 Apr 2026) names Kalshi and Polymarket and
+  recommends blocking access by Brazilians; on 24 Apr 2026 ANATEL was asked to have ISPs block 28
+  prediction-market companies (the official pages do not list them; only the press says Kalshi and
+  Polymarket are included). No official source sanctions users or addresses reading public data.
+- MP 1.394 (25 Sep 2026) bans offering and advertising fixed-odds betting, including content aimed
+  at the Brazilian public that "facilitates access". This project publishes research aggregates,
+  never betting links or promotion.
+
+Rules for this project while in Brazil: no VPN, proxy or other way around a block; if reads from a
+venue start failing, that venue stops and is reported; nothing is published that promotes or links
+to betting for a Brazilian audience.
 
 ## Kalshi
 
@@ -77,7 +101,9 @@ Sources: <https://docs.kalshi.com/getting_started/api_environments>,
   Whether KY is restricted could not be read first-hand (the agreement PDF could not be
   extracted, and kalshi.com answered 429 to automated reads): **UNVERIFIED**. No account is
   needed for this project.
-- **Terms on data use: needs the owner's decision before M2.**
+- **Terms on data use: owner decision of 2026-11-09 (docs/decisions.md).** The owner accepted
+  the risk below. Only public read-only endpoints are used; the archive stays local and is never
+  redistributed; published aggregates name Kalshi (KalshiEx LLC, kalshi.com) as the source.
   - Kalshi Developer Agreement v1.1 (<https://assets.kalshi.com/Kalshi-Developer-Agreement.pdf>,
     linked from <https://kalshi.com/developer-agreement>): section 1 says using the API accepts
     the agreement. Section 3 limits API use to "facilitating a members own trading on the

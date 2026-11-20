@@ -6,12 +6,16 @@ Commands whose milestone has not been built yet exit with code 2 and name the mi
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Coroutine
+from datetime import date
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 
 from pmr import logs
+from pmr.collectors.base import CollectorError, IngestStats
 from pmr.settings import DEFAULT_CONFIG_PATH, PmrConfig, Settings, load_config
 
 app = typer.Typer(
@@ -72,40 +76,85 @@ ingest_app = typer.Typer(help="Collect raw data from a venue (M2).", no_args_is_
 app.add_typer(ingest_app, name="ingest")
 
 
+def _window(cfg: PmrConfig, since: str | None, until: str | None) -> tuple[date, date | None]:
+    lo = date.fromisoformat(since) if since else cfg.study_window.from_
+    hi_cfg = cfg.study_window.to
+    hi = date.fromisoformat(until) if until else (None if hi_cfg == "latest" else hi_cfg)
+    return lo, hi
+
+
+def _run_ingest(label: str, coro: Coroutine[Any, Any, IngestStats]) -> None:
+    try:
+        stats = asyncio.run(coro)
+    except CollectorError as exc:
+        typer.echo(f"pmr ingest {label}: {exc}", err=True)
+        raise typer.Exit(code=3) from exc
+    typer.echo(f"pmr ingest {label}: {stats.as_dict()}")
+
+
 @ingest_app.command("kalshi")
 def ingest_kalshi(
-    what: Annotated[str, typer.Option("--what")] = "markets",
+    what: Annotated[
+        str, typer.Option("--what", help="series|events|markets|historical|trades|candles|books")
+    ] = "markets",
     since: Annotated[str | None, typer.Option("--since")] = None,
     until: Annotated[str | None, typer.Option("--until")] = None,
     status: Annotated[str | None, typer.Option("--status")] = None,
     config: ConfigOpt = DEFAULT_CONFIG_PATH,
     log_level: LogOpt = None,
 ) -> None:
-    """Kalshi live and historical, routed by /historical/cutoff."""
-    _not_yet("ingest kalshi", "M2")
+    """Kalshi live and historical, routed by /historical/cutoff (disabled until allowed)."""
+    from pmr.collectors.run import ingest_kalshi as run
+
+    settings, cfg = _setup(config, log_level)
+    lo, hi = _window(cfg, since, until)
+    _run_ingest(
+        f"kalshi --what {what}",
+        run(settings, cfg, settings.data_dir(), what, since=lo, until=hi, status=status),
+    )
 
 
 @ingest_app.command("polymarket")
 def ingest_polymarket(
-    source: Annotated[str, typer.Option("--source")] = "gamma",
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source", help="onchain-markets|onchain-fills (history, from Brazil); gamma|data|clob"
+        ),
+    ] = "gamma",
     since: Annotated[str | None, typer.Option("--since")] = None,
     until: Annotated[str | None, typer.Option("--until")] = None,
     config: ConfigOpt = DEFAULT_CONFIG_PATH,
     log_level: LogOpt = None,
 ) -> None:
-    """Polymarket metadata, books, price history, trades and on-chain fills."""
-    _not_yet("ingest polymarket", "M2")
+    """Polymarket metadata, price history, trades and on-chain fills."""
+    from pmr.collectors.run import ingest_polymarket as run
+
+    settings, cfg = _setup(config, log_level)
+    lo, hi = _window(cfg, since, until)
+    _run_ingest(
+        f"polymarket --source {source}",
+        run(settings, cfg, settings.data_dir(), source, since=lo, until=hi),
+    )
 
 
 @ingest_app.command("manifold")
 def ingest_manifold(
+    what: Annotated[str, typer.Option("--what", help="markets|details|bets")] = "markets",
     since: Annotated[str | None, typer.Option("--since")] = None,
     until: Annotated[str | None, typer.Option("--until")] = None,
     config: ConfigOpt = DEFAULT_CONFIG_PATH,
     log_level: LogOpt = None,
 ) -> None:
-    """Resolved binary Manifold markets and their bets."""
-    _not_yet("ingest manifold", "M2")
+    """Resolved binary Manifold markets, their full records and their bets."""
+    from pmr.collectors.run import ingest_manifold as run
+
+    settings, cfg = _setup(config, log_level)
+    lo, hi = _window(cfg, since, until)
+    _run_ingest(
+        f"manifold --what {what}",
+        run(settings, cfg, settings.data_dir(), what, since=lo, until=hi),
+    )
 
 
 @ingest_app.command("metaculus")
@@ -115,14 +164,21 @@ def ingest_metaculus(
     config: ConfigOpt = DEFAULT_CONFIG_PATH,
     log_level: LogOpt = None,
 ) -> None:
-    """Metaculus binary questions and community prediction histories."""
-    _not_yet("ingest metaculus", "M2")
+    """Metaculus binary questions and community prediction histories (needs the token)."""
+    from pmr.collectors.run import ingest_metaculus as run
+
+    settings, cfg = _setup(config, log_level)
+    lo, hi = _window(cfg, since, until)
+    _run_ingest("metaculus", run(settings, cfg, settings.data_dir(), since=lo, until=hi))
 
 
 @ingest_app.command("fred")
 def ingest_fred(config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None) -> None:
     """FRED DTB3 series."""
-    _not_yet("ingest fred", "M2")
+    from pmr.collectors.run import ingest_fred as run
+
+    settings, cfg = _setup(config, log_level)
+    _run_ingest("fred", run(settings, cfg, settings.data_dir()))
 
 
 # ---------------------------------------------------------------- normalize, warehouse
@@ -136,33 +192,97 @@ def normalize(
     log_level: LogOpt = None,
 ) -> None:
     """Raw archive to interim Parquet in the unified schema."""
-    _not_yet("normalize", "M2")
+    from pmr.normalize import categories
+    from pmr.normalize.run import run
+
+    settings, _ = _setup(config, log_level)
+    st = run(settings.data_dir(), categories.load(), venue=venue, rebuild=rebuild)
+    typer.echo(f"pmr normalize: parts={st.parts} skipped={st.skipped} rows={st.rows}")
 
 
-warehouse_app = typer.Typer(help="DuckDB warehouse (M2).", no_args_is_help=True)
+warehouse_app = typer.Typer(help="DuckDB warehouse.", no_args_is_help=True)
 app.add_typer(warehouse_app, name="warehouse")
 
-
-def _warehouse_cmd(name: str) -> None:
-    @warehouse_app.command(name)
-    def _cmd(
-        path: Annotated[Path | None, typer.Option("--path")] = None,
-        config: ConfigOpt = DEFAULT_CONFIG_PATH,
-        log_level: LogOpt = None,
-    ) -> None:
-        _not_yet(f"warehouse {name}", "M2")
-
-    _cmd.__doc__ = f"Warehouse {name}."
+PathOpt = Annotated[Path | None, typer.Option("--path", help="Warehouse file (default: settings).")]
 
 
-for _name in ("build", "migrate", "stats", "checksum"):
-    _warehouse_cmd(_name)
+def _wh_path(settings: Settings, path: Path | None) -> Path:
+    return path or settings.warehouse_path()
+
+
+@warehouse_app.command("build")
+def warehouse_build(
+    path: PathOpt = None, config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None
+) -> None:
+    """Rebuild the warehouse from interim Parquet."""
+    from pmr.normalize import categories
+    from pmr.warehouse.build import build
+
+    settings, _ = _setup(config, log_level)
+    res = build(settings.data_dir(), _wh_path(settings, path), categories.load())
+    typer.echo(f"pmr warehouse build: {res.path} {res.rows}")
+
+
+@warehouse_app.command("migrate")
+def warehouse_migrate(
+    path: PathOpt = None, config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None
+) -> None:
+    """Apply pending schema migrations."""
+    from pmr.warehouse.build import migrate
+
+    settings, _ = _setup(config, log_level)
+    typer.echo(f"pmr warehouse migrate: applied {migrate(_wh_path(settings, path))}")
+
+
+@warehouse_app.command("stats")
+def warehouse_stats(
+    path: PathOpt = None, config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None
+) -> None:
+    """Rows per table and venue."""
+    from pmr.warehouse.build import stats
+
+    settings, _ = _setup(config, log_level)
+    for table, counts in stats(_wh_path(settings, path)).items():
+        typer.echo(f"{table}: {counts}")
+
+
+@warehouse_app.command("checksum")
+def warehouse_checksum(
+    path: PathOpt = None, config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None
+) -> None:
+    """Per-table checksums (two rebuilds must agree, AC-W-04)."""
+    from pmr.warehouse.build import checksums
+
+    settings, _ = _setup(config, log_level)
+    for table, value in checksums(_wh_path(settings, path)).items():
+        typer.echo(f"{table} {value}")
 
 
 @app.command()
-def inventory(config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None) -> None:
+def inventory(
+    out: Annotated[Path, typer.Option("--out")] = Path("reports/data_inventory.md"),
+    config: ConfigOpt = DEFAULT_CONFIG_PATH,
+    log_level: LogOpt = None,
+) -> None:
     """Write reports/data_inventory.md."""
-    _not_yet("inventory", "M2")
+    from pmr.warehouse.inventory import inventory as run
+
+    settings, cfg = _setup(config, log_level)
+    lo, hi = _window(cfg, None, None)
+    lf = cfg.calibration.liquidity_filter
+    res = run(
+        settings.warehouse_path(),
+        settings.data_dir(),
+        since=lo,
+        until=hi,
+        min_trades=lf.min_trades,
+        min_notional=lf.min_notional,
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(res.markdown, encoding="utf-8", newline="\n")
+    typer.echo(
+        f"pmr inventory: eligible={res.eligible_by_venue} total={res.eligible_total} -> {out}"
+    )
 
 
 # ------------------------------------------------------------------------------- match

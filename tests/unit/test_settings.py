@@ -16,6 +16,12 @@ from pmr.settings import (
 from tests.conftest import REPO
 
 
+@pytest.fixture(autouse=True)
+def _no_data_dir_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # conftest points PMR_DATA_DIR at tmp for every other test; these tests set it explicitly.
+    monkeypatch.delenv("PMR_DATA_DIR", raising=False)
+
+
 def S(**kw: object) -> Settings:
     return Settings(_env_file=None, **kw)  # type: ignore[call-arg]
 
