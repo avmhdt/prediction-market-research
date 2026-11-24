@@ -10,7 +10,8 @@
 # writes warehouse.DONE, after which the cron line does nothing.
 set -u
 DEPLOY="$HOME/deploy/prediction-market-research"
-DATA="$HOME/data/prediction-market-research"
+export PMR_DATA_DIR="$HOME/data/prediction-market-research"  # as the paper supervisor
+DATA="$PMR_DATA_DIR"
 LOG="$DATA/logs/warehouse_steps.log"
 STOP="$DATA/warehouse.STOP"
 DONE="$DATA/warehouse.DONE"
