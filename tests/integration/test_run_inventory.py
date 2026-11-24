@@ -17,6 +17,7 @@ from pmr.normalize.run import run as normalize
 from pmr.settings import PmrConfig, Settings
 from pmr.warehouse import build as build_mod
 from pmr.warehouse.build import build, checksums
+from pmr.warehouse.guard import BuildStopped, Guard
 from pmr.warehouse.inventory import inventory
 from tests.conftest import REPO
 from tests.fixtures import synth
@@ -107,25 +108,26 @@ async def test_runners_build_and_inventory(
     strict = inventory(wh, tmp_path, since=lo, until=None, min_trades=5, min_notional=100.0)
     assert strict.eligible_total == 0
 
-    # A build stopped part way resumes from its committed steps and gives the same tables.
+    # A build run a few steps at a time (as the hourly runs do) gives the same tables, and a
+    # step the guard interrupts rolls back and is redone by the next run.
     first = checksums(wh)
-    real_step = build_mod._step
-    calls: list[str] = []
-
-    def stop_after_two(con: object, step: str, *sql: str) -> None:
-        calls.append(step)
-        if len(calls) > 2:
-            raise RuntimeError("stopped")
-        real_step(con, step, *sql)  # type: ignore[arg-type]
-
     wh2 = tmp_path / "w2.duckdb"
-    monkeypatch.setattr(build_mod, "_step", stop_after_two)
-    with pytest.raises(RuntimeError):
-        build(tmp_path, wh2, cats(), threads=1)
+    res = build(tmp_path, wh2, cats(), threads=1, max_steps=3)
+    assert not res.complete and len(res.steps_run) == 3 and res.steps_left > 0
     assert (tmp_path / "w2.duckdb.tmp").exists() and not wh2.exists()
-    monkeypatch.setattr(build_mod, "_step", real_step)
-    build(tmp_path, wh2, cats(), threads=1)
+    with pytest.raises(BuildStopped, match="paper_behind"):
+        build(tmp_path, wh2, cats(), threads=1, guard=Guard(heartbeat=tmp_path / "missing"))
+    runs = 0
+    while not res.complete:
+        res = build(tmp_path, wh2, cats(), threads=1, max_steps=5)
+        runs += 1
+        assert runs < 40
     assert checksums(wh2) == first
+    # Hash buckets change only how the work is split, not the result.
+    monkeypatch.setattr(build_mod, "BUCKETS", dict.fromkeys(build_mod.BUCKETS, 1))
+    wh3 = tmp_path / "w3.duckdb"
+    build(tmp_path, wh3, cats(), threads=1)
+    assert checksums(wh3) == first
 
 
 @respx.mock

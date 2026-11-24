@@ -94,7 +94,12 @@ def cached_token_map(con: duckdb.DuckDBPyConnection, data_dir: Path) -> None:
     log.info("onchain_token_map", cached=known.height, derived=fresh.height)
 
 
-def stage_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: CategoryMap) -> int:
+def stage_markets(
+    con: duckdb.DuckDBPyConnection,
+    data_dir: Path,
+    cats: CategoryMap,
+    bucket: tuple[int, int] | None = None,
+) -> int:
     """Append Polymarket markets from the on-chain tables to the ``m_raw`` stage; returns the
     number of markets staged (0 when there is no on-chain data)."""
     cond_files = interim_files(data_dir, "oc_conditions")
@@ -114,6 +119,17 @@ def stage_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: Category
         """
     )
     cached_token_map(con, data_dir)
+    if bucket is not None:
+        b, n = bucket
+        # Keep the conditions whose market symbol (the outcome-0 token) is in this bucket.
+        con.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE oc_cond AS
+            SELECT c.* FROM oc_cond c
+            JOIN oc_tmap y ON y.condition_id = c.condition_id AND y.outcome = 0
+            WHERE hash(y.token_id) % {int(n)} = {int(b)}
+            """
+        )
     q_files = interim_files(data_dir, "oc_questions")
     r_files = interim_files(data_dir, "oc_resolutions")
     q_src = (
@@ -137,13 +153,16 @@ def stage_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: Category
         CREATE OR REPLACE TEMP TABLE oc_text AS
         SELECT question_id, arg_max(title, ts) AS title, arg_max(rules, ts) AS rules
         FROM {q_src} WHERE kind IN ('uma', 'negrisk') AND title IS NOT NULL
+          AND question_id IN (SELECT question_id FROM oc_cond)
         GROUP BY question_id;
         CREATE OR REPLACE TEMP TABLE oc_reset AS
-        SELECT DISTINCT question_id FROM {q_src} WHERE kind = 'reset';
+        SELECT DISTINCT question_id FROM {q_src} WHERE kind = 'reset'
+          AND question_id IN (SELECT question_id FROM oc_cond);
         CREATE OR REPLACE TEMP TABLE oc_res AS
         SELECT condition_id, arg_max(payout0, ts) AS p0, arg_max(payout1, ts) AS p1,
                max(ts) AS rts
-        FROM {r_src} GROUP BY condition_id;
+        FROM {r_src} WHERE condition_id IN (SELECT condition_id FROM oc_cond)
+        GROUP BY condition_id;
         """
     )
     titles = [t for (t,) in con.execute("SELECT DISTINCT title FROM oc_text").fetchall()]
@@ -187,7 +206,7 @@ def stage_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: Category
     after = con.execute("SELECT count(*) FROM m_raw").fetchone()
     staged = int(after[0]) - int(before[0]) if after and before else 0
     tok_files = interim_files(data_dir, "oc_tokens")
-    if tok_files:
+    if tok_files and (bucket is None or bucket[0] == 0):
         row = con.execute(
             f"""
             WITH reg AS (

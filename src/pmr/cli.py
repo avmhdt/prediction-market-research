@@ -210,17 +210,65 @@ def _wh_path(settings: Settings, path: Path | None) -> Path:
     return path or settings.warehouse_path()
 
 
+EXIT_YIELDED = 75  # the guard stopped the run (memory, paper polling); the next run may retry
+EXIT_STOPPED = 74  # disk error or write cap: later runs are blocked until a person clears it
+
+
 @warehouse_app.command("build")
 def warehouse_build(
-    path: PathOpt = None, config: ConfigOpt = DEFAULT_CONFIG_PATH, log_level: LogOpt = None
+    path: PathOpt = None,
+    max_steps: Annotated[
+        int | None,
+        typer.Option("--max-steps", min=1, help="Stop after this many new steps (resumable)."),
+    ] = None,
+    guard: Annotated[
+        bool,
+        typer.Option(
+            "--guard",
+            help="Stop on low memory, a disk error, a write cap or stalled paper polling.",
+        ),
+    ] = False,
+    config: ConfigOpt = DEFAULT_CONFIG_PATH,
+    log_level: LogOpt = None,
 ) -> None:
-    """Rebuild the warehouse from interim Parquet."""
+    """Build the warehouse from interim Parquet (resumes a stopped build).
+
+    With ``--guard`` a disk error or the write cap writes ``<data>/warehouse.STOP``; while that
+    file exists guarded runs refuse to start."""
     from pmr.normalize import categories
+    from pmr.warehouse import guard as guard_mod
     from pmr.warehouse.build import build
 
     settings, _ = _setup(config, log_level)
-    res = build(settings.data_dir(), _wh_path(settings, path), categories.load())
-    typer.echo(f"pmr warehouse build: {res.path} {res.rows}")
+    data = settings.data_dir()
+    stop_file = data / "warehouse.STOP"
+    g = None
+    if guard:
+        if stop_file.exists():
+            typer.echo(f"pmr warehouse build: refused, {stop_file} exists")
+            raise typer.Exit(EXIT_STOPPED)
+        g = guard_mod.Guard(
+            heartbeat=guard_mod.default_heartbeat(data),
+            max_heartbeat_age_s=guard_mod.env_float("PMR_GUARD_HEARTBEAT_S", 120.0),
+            min_avail_gb=guard_mod.env_float("PMR_GUARD_MIN_AVAIL_GB", 30.0),
+            max_write_gb=guard_mod.env_float("PMR_GUARD_MAX_WRITE_GB", 4.0),
+        )
+    try:
+        res = build(data, _wh_path(settings, path), categories.load(), max_steps=max_steps, guard=g)
+    except guard_mod.BuildStopped as e:
+        gb = g.written_gb() if g is not None else None
+        typer.echo(f"pmr warehouse build: stopped ({e.reason}); written {gb} GB")
+        if e.sticky:
+            stop_file.write_text(e.reason + "\n", encoding="utf-8")
+            raise typer.Exit(EXIT_STOPPED) from e
+        raise typer.Exit(EXIT_YIELDED) from e
+    if g is not None:
+        gb = g.written_gb()
+        typer.echo(f"pmr warehouse build: written {gb:.2f} GB" if gb is not None else "")
+    if res.complete:
+        typer.echo(f"pmr warehouse build: complete {res.path} {res.rows}")
+    else:
+        typer.echo(f"pmr warehouse build: ran {list(res.steps_run)}, {res.steps_left} steps left")
 
 
 @warehouse_app.command("migrate")
