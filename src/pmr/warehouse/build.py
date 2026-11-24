@@ -24,7 +24,9 @@ import contextlib
 import hashlib
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import duckdb
@@ -35,6 +37,7 @@ from pmr.normalize.categories import CategoryMap
 from pmr.normalize.schema import MARKETS
 from pmr.normalize.store import interim_files
 from pmr.warehouse import onchain
+from pmr.warehouse.guard import BuildStopped, Guard
 
 log = structlog.get_logger("pmr.warehouse")
 
@@ -74,6 +77,15 @@ def memory_limit() -> str:
     return v if re.fullmatch(r"\d+(\.\d+)?(MB|GB)", v) else MEMORY_LIMIT
 
 
+TEMP_LIMIT = "1GB"  # owner decision 2026-11-24: no multi-GB spill bursts on the shared drive
+
+
+def temp_limit() -> str:
+    """DuckDB spill cap: ``PMR_DUCKDB_TEMP_MAX`` (for example ``2GB``) or :data:`TEMP_LIMIT`."""
+    v = os.environ.get("PMR_DUCKDB_TEMP_MAX", "").strip().upper()
+    return v if re.fullmatch(r"\d+(\.\d+)?(MB|GB)", v) else TEMP_LIMIT
+
+
 def _connect(path: Path, threads: int) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(path))
     con.execute(f"SET threads = {int(threads)}")
@@ -81,6 +93,7 @@ def _connect(path: Path, threads: int) -> duckdb.DuckDBPyConnection:
     spill = path.parent / "duckdb_spill"
     spill.mkdir(parents=True, exist_ok=True)
     con.execute(f"SET temp_directory = '{str(spill).replace(chr(39), chr(39) * 2)}'")
+    con.execute(f"SET max_temp_directory_size = '{temp_limit()}'")
     # Row order inside tables is irrelevant (checksums are order-independent), and keeping it
     # costs memory on large inserts.
     con.execute("SET preserve_insertion_order = false")
@@ -192,17 +205,8 @@ def create_markets_stage(con: duckdb.DuckDBPyConnection, name: str = "m_raw") ->
     con.execute(f"CREATE OR REPLACE TABLE {name} ({typed})")
 
 
-def load_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: CategoryMap) -> None:
-    """Stage every market snapshot, enrich and categorize in SQL, insert Type-2 versions."""
-    cols = ", ".join(MARKETS)
-    create_markets_stage(con)
-    files = interim_files(data_dir, "markets")
-    if files:
-        con.execute(
-            f"INSERT INTO m_raw SELECT {cols} FROM read_parquet({_parquet_list(files)}, "
-            "hive_partitioning = false, union_by_name = true)"
-        )
-    onchain.stage_markets(con, data_dir, cats)
+def load_events(con: duckdb.DuckDBPyConnection, data_dir: Path) -> None:
+    """Insert the distinct event and series records."""
     ev_files = interim_files(data_dir, "events")
     if ev_files:
         con.execute(
@@ -212,26 +216,46 @@ def load_markets(con: duckdb.DuckDBPyConnection, data_dir: Path, cats: CategoryM
             FROM read_parquet({_parquet_list(ev_files)}, hive_partitioning = false)
             """
         )
-        # Kalshi: series from the event, category from the series (else the event).
-        for stmt in (
-            """CREATE TEMP TABLE ev_latest AS
-               SELECT venue, event_id, arg_max(series_id, ingested_at) AS series_id,
-                      arg_max(category_raw, ingested_at) AS cat
-               FROM events WHERE event_id IS NOT NULL GROUP BY venue, event_id""",
-            """CREATE TEMP TABLE se_latest AS
-               SELECT venue, series_id, arg_max(category_raw, ingested_at) AS cat
-               FROM events WHERE event_id IS NULL GROUP BY venue, series_id""",
-            """UPDATE m_raw SET series_id = e.series_id FROM ev_latest e
-               WHERE m_raw.venue = 'kalshi' AND m_raw.series_id IS NULL
-                 AND m_raw.venue = e.venue AND m_raw.event_id = e.event_id""",
-            """UPDATE m_raw SET category_raw = s.cat FROM se_latest s
-               WHERE m_raw.venue = 'kalshi' AND m_raw.category_raw IS NULL
-                 AND m_raw.venue = s.venue AND m_raw.series_id = s.series_id""",
-            """UPDATE m_raw SET category_raw = e.cat FROM ev_latest e
-               WHERE m_raw.venue = 'kalshi' AND m_raw.category_raw IS NULL
-                 AND m_raw.venue = e.venue AND m_raw.event_id = e.event_id""",
-        ):
-            con.execute(stmt)
+
+
+def load_markets(
+    con: duckdb.DuckDBPyConnection,
+    data_dir: Path,
+    cats: CategoryMap,
+    bucket: tuple[int, int] | None = None,
+) -> None:
+    """Stage market snapshots (all, or one ``(b, n)`` hash bucket of ``symbol``), enrich and
+    categorize in SQL, insert Type-2 versions. Needs ``events`` loaded first."""
+    cols = ", ".join(MARKETS)
+    where = f"WHERE {_bucket('symbol', *bucket)}" if bucket else ""
+    create_markets_stage(con)
+    files = interim_files(data_dir, "markets")
+    if files:
+        con.execute(
+            f"INSERT INTO m_raw SELECT {cols} FROM read_parquet({_parquet_list(files)}, "
+            f"hive_partitioning = false, union_by_name = true) {where}"
+        )
+    onchain.stage_markets(con, data_dir, cats, bucket)
+    # Kalshi: series from the event, category from the series (else the event).
+    for stmt in (
+        """CREATE OR REPLACE TEMP TABLE ev_latest AS
+           SELECT venue, event_id, arg_max(series_id, ingested_at) AS series_id,
+                  arg_max(category_raw, ingested_at) AS cat
+           FROM events WHERE event_id IS NOT NULL GROUP BY venue, event_id""",
+        """CREATE OR REPLACE TEMP TABLE se_latest AS
+           SELECT venue, series_id, arg_max(category_raw, ingested_at) AS cat
+           FROM events WHERE event_id IS NULL GROUP BY venue, series_id""",
+        """UPDATE m_raw SET series_id = e.series_id FROM ev_latest e
+           WHERE m_raw.venue = 'kalshi' AND m_raw.series_id IS NULL
+             AND m_raw.venue = e.venue AND m_raw.event_id = e.event_id""",
+        """UPDATE m_raw SET category_raw = s.cat FROM se_latest s
+           WHERE m_raw.venue = 'kalshi' AND m_raw.category_raw IS NULL
+             AND m_raw.venue = s.venue AND m_raw.series_id = s.series_id""",
+        """UPDATE m_raw SET category_raw = e.cat FROM ev_latest e
+           WHERE m_raw.venue = 'kalshi' AND m_raw.category_raw IS NULL
+             AND m_raw.venue = e.venue AND m_raw.event_id = e.event_id""",
+    ):
+        con.execute(stmt)
     categorize(con, "m_raw", cats)
     con.execute(
         f"INSERT INTO markets ({cols}, rules_changed, valid_to) "
@@ -275,14 +299,19 @@ def _parquet_list(files: list[Path]) -> str:
 
 @dataclass(frozen=True)
 class BuildResult:
-    """Row counts per table after a build."""
+    """Row counts per table after a build; ``complete`` is false when the run stopped after its
+    step budget (the partial build stays in ``*.tmp`` for the next run)."""
 
     path: Path
     rows: dict[str, int]
+    complete: bool = True
+    steps_run: tuple[str, ...] = ()
+    steps_left: int = 0
 
 
-# Large window steps run in hash buckets of their partition key so each fits the memory limit.
-BUCKETS = {"trades": 16, "oc_trades": 4, "price_history": 4, "book_l2": 8}
+# Large steps run in hash buckets of their partition key, so each committed step fits the
+# memory limit without spilling and writes 0.5–2 GB (owner decision 2026-11-24, plan A).
+BUCKETS = {"markets": 12, "trades": 48, "oc_trades": 8, "price_history": 4, "book_l2": 8}
 
 
 def inputs_fingerprint(data_dir: Path) -> str:
@@ -318,152 +347,243 @@ def _open_build(tmp: Path, threads: int, fp: str) -> tuple[duckdb.DuckDBPyConnec
     return con, False
 
 
-def _done(con: duckdb.DuckDBPyConnection, step: str) -> bool:
-    row = con.execute("SELECT count(*) FROM _build_steps WHERE step = ?", [step]).fetchone()
-    return bool(row and row[0])
-
-
-def _step(con: duckdb.DuckDBPyConnection, step: str, *sql: str) -> None:
-    """Run ``sql`` and record ``step`` in one transaction (skipped when already recorded)."""
-    if _done(con, step):
-        return
-    con.execute("BEGIN TRANSACTION")
-    try:
-        for q in sql:
-            con.execute(q)
-        con.execute("INSERT INTO _build_steps VALUES (?, now())", [step])
-        con.execute("COMMIT")
-    except BaseException:
-        con.execute("ROLLBACK")
-        raise
-    log.info("warehouse_step", step=step)
-
-
 def _bucket(col: str, b: int, n: int) -> str:
     return f"hash({col}) % {int(n)} = {int(b)}"
 
 
-def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) -> BuildResult:
+Action = str | Callable[[duckdb.DuckDBPyConnection], None]
+
+
+class _Budget(Exception):
+    """The run's step budget is spent."""
+
+
+class _Steps:
+    """Runs named steps, each in one transaction recorded in ``_build_steps``; skips steps
+    already recorded; stops after ``max_steps`` new steps; checks the guard before each."""
+
+    def __init__(
+        self, con: duckdb.DuckDBPyConnection, max_steps: int | None, guard: Guard | None
+    ) -> None:
+        self.con = con
+        self.max_steps = max_steps
+        self.guard = guard
+        self.run: list[str] = []
+        self.skipped_left = 0
+
+    def done(self, step: str) -> bool:
+        row = self.con.execute(
+            "SELECT count(*) FROM _build_steps WHERE step = ?", [step]
+        ).fetchone()
+        return bool(row and row[0])
+
+    def __call__(self, step: str, *sql: Action) -> None:
+        if self.done(step):
+            return
+        if self.max_steps is not None and len(self.run) >= self.max_steps:
+            self.skipped_left += 1
+            raise _Budget(step)
+        if self.guard is not None:
+            self.guard.raise_if_stopped()
+        con = self.con
+        con.execute("BEGIN TRANSACTION")
+        try:
+            for q in sql:
+                if callable(q):
+                    q(con)
+                else:
+                    con.execute(q)
+            con.execute("INSERT INTO _build_steps VALUES (?, now())", [step])
+            con.execute("COMMIT")
+        except BaseException:
+            with contextlib.suppress(duckdb.Error):
+                con.execute("ROLLBACK")
+            raise
+        self.run.append(step)
+        log.info("warehouse_step", step=step)
+
+
+def _plan(data_dir: Path, cats: CategoryMap) -> list[tuple[str, tuple[Action, ...]]]:
+    """Every build step in order, as ``(name, actions)``; an action is SQL or a function of
+    the connection."""
+    steps: list[tuple[str, tuple[Action, ...]]] = []
+    steps.append(("events", (partial(load_events, data_dir=data_dir),)))
+    n = BUCKETS["markets"]
+    for b in range(n):
+        steps.append(
+            (
+                f"markets:{b}/{n}",
+                (partial(load_markets, data_dir=data_dir, cats=cats, bucket=(b, n)),),
+            )
+        )
+    files = interim_files(data_dir, "trades")
+    if files:
+        n = BUCKETS["trades"]
+        for b in range(n):
+            steps.append(
+                (
+                    f"trades:{b}/{n}",
+                    (
+                        f"""
+                        INSERT INTO trades
+                        SELECT t.ts_exchange, t.ts_recv, t.venue, coalesce(t.symbol, m.symbol),
+                               t.trade_id, t.price, t.qty, t.side,
+                               coalesce(nullif(t.market_id, ''), ms.market_id, t.symbol),
+                               t.source, t.notional
+                        FROM (
+                            SELECT *, row_number() OVER (
+                                PARTITION BY venue, trade_id
+                                ORDER BY {SOURCE_RANK}, ts_recv, ts_exchange, price, qty
+                            ) AS rn
+                            FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
+                            WHERE ts_exchange IS NOT NULL AND price BETWEEN 0 AND 1
+                              AND {_bucket("trade_id", b, n)}
+                        ) t
+                        LEFT JOIN (
+                            SELECT venue, market_id, min(symbol) AS symbol
+                            FROM markets WHERE valid_to IS NULL GROUP BY venue, market_id
+                        ) m ON t.venue = m.venue AND t.market_id = m.market_id
+                        LEFT JOIN (
+                            SELECT venue, symbol, min(market_id) AS market_id
+                            FROM markets WHERE valid_to IS NULL GROUP BY venue, symbol
+                        ) ms ON t.venue = ms.venue AND t.symbol = ms.symbol
+                        WHERE t.rn = 1
+                        """,
+                    ),
+                )
+            )
+    files = interim_files(data_dir, "oc_fills")
+    if files:
+        n = BUCKETS["oc_trades"]
+        src = f"SELECT * FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)"
+        for b in range(n):
+            steps.append(
+                (
+                    f"oc_trades:{b}/{n}",
+                    (
+                        partial(onchain.ensure_token_map, data_dir=data_dir),
+                        onchain.insert_trades_sql(
+                            f"SELECT * FROM ({src}) WHERE {_bucket('trade_id', b, n)}"
+                        ),
+                    ),
+                )
+            )
+    files = interim_files(data_dir, "price_history")
+    if files:
+        n = BUCKETS["price_history"]
+        for b in range(n):
+            steps.append(
+                (
+                    f"price_history:{b}/{n}",
+                    (
+                        f"""
+                        INSERT INTO price_history
+                        SELECT venue, symbol, ts, interval_s, open, high, low, close,
+                               yes_bid_close, yes_ask_close, volume, open_interest, n_forecasters
+                        FROM (
+                            SELECT *, row_number() OVER (
+                                PARTITION BY venue, symbol, ts, interval_s
+                                ORDER BY ingested_at DESC, close
+                            ) AS rn
+                            FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
+                            WHERE ts IS NOT NULL AND symbol IS NOT NULL
+                              AND {_bucket("symbol", b, n)}
+                        )
+                        WHERE rn = 1
+                        """,
+                    ),
+                )
+            )
+    files = interim_files(data_dir, "book_l2")
+    if files:
+        n = BUCKETS["book_l2"]
+        for b in range(n):
+            steps.append(
+                (
+                    f"book_l2:{b}/{n}",
+                    (
+                        f"""
+                        INSERT INTO book_l2
+                        SELECT ts_exchange, ts_recv, venue, symbol,
+                               dense_rank() OVER (PARTITION BY venue, symbol ORDER BY ts_recv)
+                                   AS seq,
+                               side, price, qty, is_snapshot
+                        FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
+                        WHERE symbol IS NOT NULL AND {_bucket("symbol", b, n)}
+                        """,
+                    ),
+                )
+            )
+    files = interim_files(data_dir, "risk_free")
+    if files:
+        steps.append(
+            (
+                "risk_free",
+                (
+                    f"""
+                    INSERT INTO risk_free
+                    SELECT "date", series, rate_pct FROM (
+                        SELECT *, row_number() OVER (
+                            PARTITION BY series, "date" ORDER BY ingested_at DESC, rate_pct
+                        ) AS rn
+                        FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
+                    ) WHERE rn = 1
+                    """,
+                ),
+            )
+        )
+    return steps
+
+
+def build(
+    data_dir: Path,
+    path: Path,
+    cats: CategoryMap,
+    *,
+    threads: int = 8,
+    max_steps: int | None = None,
+    guard: Guard | None = None,
+) -> BuildResult:
     """Build the warehouse at ``path`` from ``<data_dir>/interim``.
 
     Work goes to ``*.tmp`` and is renamed at the end. Each step (and each hash bucket of a
-    large step) commits with a record in ``_build_steps``; a build stopped part way (for
-    example by the shared-PC memory watchdog) resumes from the last committed step when the
-    interim files are unchanged, and starts over otherwise.
+    large step) commits with a record in ``_build_steps``; a stopped build resumes from the
+    last committed step when the interim files are unchanged, and starts over otherwise. With
+    ``max_steps`` the run stops after that many new steps (``complete`` is then false). With a
+    ``guard`` each step is checked before it starts and interrupted (rolled back) when a check
+    fails, which raises :class:`~pmr.warehouse.guard.BuildStopped`.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     con, resumed = _open_build(tmp, threads, inputs_fingerprint(data_dir))
+    runner = _Steps(con, max_steps, guard)
     if resumed:
         done = [r[0] for r in con.execute("SELECT step FROM _build_steps").fetchall()]
-        log.info("warehouse_resume", done=sorted(done))
+        log.info("warehouse_resume", done=len(done))
+    plan = _plan(data_dir, cats)
+    watch = guard.watch(con) if guard is not None else contextlib.nullcontext()
+    complete = False
     try:
-        if not _done(con, "markets"):
-            con.execute("DELETE FROM markets")
-            con.execute("DELETE FROM events")
-            load_markets(con, data_dir, cats)
-            _step(con, "markets")
-
-        files = interim_files(data_dir, "trades")
-        if files:
-            n = BUCKETS["trades"]
-            for b in range(n):
-                _step(
-                    con,
-                    f"trades:{b}/{n}",
-                    f"""
-                    INSERT INTO trades
-                    SELECT t.ts_exchange, t.ts_recv, t.venue, coalesce(t.symbol, m.symbol),
-                           t.trade_id, t.price, t.qty, t.side,
-                           coalesce(nullif(t.market_id, ''), ms.market_id, t.symbol),
-                           t.source, t.notional
-                    FROM (
-                        SELECT *, row_number() OVER (
-                            PARTITION BY venue, trade_id
-                            ORDER BY {SOURCE_RANK}, ts_recv, ts_exchange, price, qty
-                        ) AS rn
-                        FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
-                        WHERE ts_exchange IS NOT NULL AND price BETWEEN 0 AND 1
-                          AND {_bucket("trade_id", b, n)}
-                    ) t
-                    LEFT JOIN (
-                        SELECT venue, market_id, min(symbol) AS symbol
-                        FROM markets WHERE valid_to IS NULL GROUP BY venue, market_id
-                    ) m ON t.venue = m.venue AND t.market_id = m.market_id
-                    LEFT JOIN (
-                        SELECT venue, symbol, min(market_id) AS market_id
-                        FROM markets WHERE valid_to IS NULL GROUP BY venue, symbol
-                    ) ms ON t.venue = ms.venue AND t.symbol = ms.symbol
-                    WHERE t.rn = 1
-                    """,
-                )
-        files = interim_files(data_dir, "oc_fills")
-        if files:
-            onchain.ensure_token_map(con, data_dir)
-            n = BUCKETS["oc_trades"]
-            src = f"SELECT * FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)"
-            for b in range(n):
-                _step(
-                    con,
-                    f"oc_trades:{b}/{n}",
-                    onchain.insert_trades_sql(
-                        f"SELECT * FROM ({src}) WHERE {_bucket('trade_id', b, n)}"
-                    ),
-                )
-        files = interim_files(data_dir, "price_history")
-        if files:
-            n = BUCKETS["price_history"]
-            for b in range(n):
-                _step(
-                    con,
-                    f"price_history:{b}/{n}",
-                    f"""
-                    INSERT INTO price_history
-                    SELECT venue, symbol, ts, interval_s, open, high, low, close, yes_bid_close,
-                           yes_ask_close, volume, open_interest, n_forecasters
-                    FROM (
-                        SELECT *, row_number() OVER (
-                            PARTITION BY venue, symbol, ts, interval_s
-                            ORDER BY ingested_at DESC, close
-                        ) AS rn
-                        FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
-                        WHERE ts IS NOT NULL AND symbol IS NOT NULL
-                          AND {_bucket("symbol", b, n)}
-                    )
-                    WHERE rn = 1
-                    """,
-                )
-        files = interim_files(data_dir, "book_l2")
-        if files:
-            n = BUCKETS["book_l2"]
-            for b in range(n):
-                _step(
-                    con,
-                    f"book_l2:{b}/{n}",
-                    f"""
-                    INSERT INTO book_l2
-                    SELECT ts_exchange, ts_recv, venue, symbol,
-                           dense_rank() OVER (PARTITION BY venue, symbol ORDER BY ts_recv)
-                               AS seq,
-                           side, price, qty, is_snapshot
-                    FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
-                    WHERE symbol IS NOT NULL AND {_bucket("symbol", b, n)}
-                    """,
-                )
-        files = interim_files(data_dir, "risk_free")
-        if files:
-            _step(
-                con,
-                "risk_free",
-                f"""
-                INSERT INTO risk_free
-                SELECT "date", series, rate_pct FROM (
-                    SELECT *, row_number() OVER (
-                        PARTITION BY series, "date" ORDER BY ingested_at DESC, rate_pct
-                    ) AS rn
-                    FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
-                ) WHERE rn = 1
-                """,
+        with watch:
+            try:
+                for name, actions in plan:
+                    runner(name, *actions)
+                complete = True
+            except _Budget:
+                pass
+            except duckdb.Error as e:
+                if guard is not None and guard.reason:
+                    raise BuildStopped(guard.reason) from e
+                if isinstance(e, duckdb.IOException):
+                    raise BuildStopped(f"disk_error: {e}") from e
+                raise
+            except OSError as e:
+                raise BuildStopped(f"disk_error: {e}") from e
+        left = sum(1 for name, _ in plan if not runner.done(name))
+        if not complete:
+            con.execute("CHECKPOINT")
+            return BuildResult(
+                path=tmp, rows={}, complete=False, steps_run=tuple(runner.run), steps_left=left
             )
         con.execute(VIEWS.read_text(encoding="utf-8"))
         con.execute("DROP TABLE _build_steps")
@@ -473,7 +593,7 @@ def build(data_dir: Path, path: Path, cats: CategoryMap, *, threads: int = 8) ->
     finally:
         con.close()
     os.replace(tmp, path)
-    return BuildResult(path=path, rows=rows)
+    return BuildResult(path=path, rows=rows, complete=True, steps_run=tuple(runner.run))
 
 
 def table_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
