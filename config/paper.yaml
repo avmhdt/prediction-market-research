@@ -17,9 +17,11 @@ strategies:
   mm_quotes: {enabled: true, q_max: 100, capital_max: 1000}
   flb_tilt: {enabled: true, buckets: [[0.90, 0.97]], notional_per_market: 50}
 min_days: 28
-# Paper period (owner decision 2026-11-17): 2026-11-15 17:47 to 2026-12-13 17:47 UTC, counted
-# from the first full poll after the 11-12 to 11-15 outage; it must end by 2026-12-15.
-period: {start: "2026-11-15T17:47:03Z", end: "2026-12-13T17:47:03Z", hard_end: "2026-12-15T00:00:00Z"}
+# Paper period (owner decision 2026-11-24, "Fresh 28 days from today"): 2026-11-24 20:38:31 to
+# 2026-12-22 20:38:31 UTC, from the first poll after the G: drive outage. The 11-15 period
+# failed (docs/decisions.md). It ends 46 min after the Windows Update pause (2026-12-22 19:52
+# UTC) unless the owner extends the pause.
+period: {start: "2026-11-24T20:38:31Z", end: "2026-12-22T20:38:31Z", hard_end: "2026-12-22T20:38:31Z"}
 rate_limits_rps: {clob.polymarket.com: 15, gamma-api.polymarket.com: 2, external-api.kalshi.com: 4, gateway.tenderly.co: 0.5}
 flush_every_cycles: 10           # raw parts are closed every 10 polls (5 minutes)
 disk_check_minutes: 10
