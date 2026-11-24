@@ -39,9 +39,9 @@ def test_memory_disk_and_write_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     assert r is not None and r.startswith("disk_error") and g.BuildStopped(r).sticky
 
     monkeypatch.setattr(g, "ext4_errors", lambda: {})
-    monkeypatch.setattr(g, "written_bytes", lambda: 0)
+    monkeypatch.setattr(g, "written_bytes", lambda _p=None: 0)
     gd = g.Guard(max_write_gb=4)
-    monkeypatch.setattr(g, "written_bytes", lambda: int(5e9))
+    monkeypatch.setattr(g, "written_bytes", lambda _p=None: int(5e9))
     r = gd.check()
     assert r is not None and r.startswith("write_cap") and g.BuildStopped(r).sticky
 

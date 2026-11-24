@@ -249,6 +249,7 @@ def warehouse_build(
             raise typer.Exit(EXIT_STOPPED)
         g = guard_mod.Guard(
             heartbeat=guard_mod.default_heartbeat(data),
+            data_dir=data,
             max_heartbeat_age_s=guard_mod.env_float("PMR_GUARD_HEARTBEAT_S", 120.0),
             min_avail_gb=guard_mod.env_float("PMR_GUARD_MIN_AVAIL_GB", 30.0),
             max_write_gb=guard_mod.env_float("PMR_GUARD_MAX_WRITE_GB", 4.0),
