@@ -13,7 +13,8 @@ from pmr.normalize import categories
 from pmr.normalize.ctf import NEG_RISK_WCOL, USDC_E, binary_tokens, condition_id
 from pmr.normalize.polymarket_onchain import T, decode, parse_ancillary, parse_question_data
 from pmr.normalize.run import run as normalize
-from pmr.warehouse.build import build
+from pmr.warehouse import build as build_mod
+from pmr.warehouse.build import build, checksums
 from pmr.warehouse.onchain import NEG_RISK_ADAPTER, check_tokens, token_map
 from tests.conftest import REPO
 
@@ -108,7 +109,7 @@ def test_text_parsers() -> None:
     assert parse_question_data("plain") == (None, "plain")
 
 
-def test_decode_and_build(tmp_path: Path) -> None:
+def test_decode_and_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rec = {"ts_recv_ns": 1, "body": {"result": logs()}}
     rows = decode(rec)
     assert len(rows["oc_fills"]) == 2 and len(rows["oc_conditions"]) == 1
@@ -134,6 +135,10 @@ def test_decode_and_build(tmp_path: Path) -> None:
     cats = categories.load(str(REPO / "config" / "categories.yaml"))
     normalize(tmp_path, cats)
     build(tmp_path, tmp_path / "w.duckdb", cats, threads=1)
+    # On-chain markets and trades load per hash bucket; the result is the same unbucketed.
+    monkeypatch.setattr(build_mod, "BUCKETS", dict.fromkeys(build_mod.BUCKETS, 1))
+    build(tmp_path, tmp_path / "w1.duckdb", cats, threads=1)
+    assert checksums(tmp_path / "w1.duckdb") == checksums(tmp_path / "w.duckdb")
     con = duckdb.connect(str(tmp_path / "w.duckdb"), read_only=True)
     m = con.execute(
         "SELECT symbol, result, title, event_id, close_ts, category FROM markets_current"

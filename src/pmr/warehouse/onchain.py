@@ -55,23 +55,35 @@ def token_map(conditions: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def cached_token_map(con: duckdb.DuckDBPyConnection, data_dir: Path) -> None:
-    """Create ``oc_tmap`` from the cache plus newly derived conditions (cache updated)."""
-    cache = Path(data_dir) / "processed" / "oc_token_map.parquet"
-    known = (
-        pl.read_parquet(cache)
-        if cache.exists()
-        else pl.DataFrame(
-            schema={"token_id": pl.String, "condition_id": pl.String, "outcome": pl.Int8}
-        )
-    )
-    con.register("oc_known", known.to_arrow())
+TMAP_EMPTY = (
+    "(SELECT NULL::VARCHAR AS token_id, NULL::VARCHAR AS condition_id, "
+    "NULL::TINYINT AS outcome WHERE false)"
+)
+
+
+def _cache_path(data_dir: Path) -> Path:
+    return Path(data_dir) / "processed" / "oc_token_map.parquet"
+
+
+def _cache_sql(data_dir: Path) -> str:
+    cache = _cache_path(data_dir)
+    if not cache.exists():
+        return TMAP_EMPTY
+    return "read_parquet('" + str(cache).replace("'", "''") + "')"
+
+
+def update_token_cache(con: duckdb.DuckDBPyConnection, data_dir: Path, cond_sql: str) -> None:
+    """Derive tokens for binary conditions not yet in the cache and append them (the cache
+    holds ``token_id -> (condition_id, outcome)`` for every condition seen so far)."""
+    cache = _cache_path(data_dir)
     todo = con.execute(
-        """
-        SELECT c.condition_id, c.oracle, c.slots FROM oc_cond c
-        WHERE c.slots = 2 AND NOT EXISTS (
-            SELECT 1 FROM oc_known k WHERE k.condition_id = c.condition_id
+        f"""
+        SELECT condition_id, arg_min(oracle, ts) AS oracle, arg_min(slots, ts) AS slots
+        FROM {cond_sql} c
+        WHERE NOT EXISTS (
+            SELECT 1 FROM {_cache_sql(data_dir)} k WHERE k.condition_id = c.condition_id
         )
+        GROUP BY condition_id HAVING arg_min(slots, ts) = 2
         """
     ).fetchall()
     fresh = token_map(
@@ -81,17 +93,38 @@ def cached_token_map(con: duckdb.DuckDBPyConnection, data_dir: Path) -> None:
             orient="row",
         )
     )
-    allmap = pl.concat([known, fresh], how="vertical") if fresh.height else known
     if fresh.height:
+        known = (
+            pl.read_parquet(cache)
+            if cache.exists()
+            else pl.DataFrame(
+                schema={"token_id": pl.String, "condition_id": pl.String, "outcome": pl.Int8}
+            )
+        )
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_name(cache.name + ".tmp")
-        allmap.write_parquet(tmp, compression="zstd")
+        pl.concat([known, fresh], how="vertical").write_parquet(tmp, compression="zstd")
         tmp.replace(cache)
-    con.unregister("oc_known")
-    con.register("oc_tmap_df", allmap.to_arrow())
-    con.execute("CREATE OR REPLACE TEMP TABLE oc_tmap AS SELECT * FROM oc_tmap_df")
-    con.unregister("oc_tmap_df")
-    log.info("onchain_token_map", cached=known.height, derived=fresh.height)
+    log.info("onchain_token_map", derived=fresh.height)
+
+
+def load_token_map(
+    con: duckdb.DuckDBPyConnection,
+    data_dir: Path,
+    bucket: tuple[int, int] | None = None,
+    name: str = "oc_tmap",
+) -> None:
+    """Create temp table ``name`` from the token cache: every token, or only the tokens of the
+    conditions whose outcome-0 token (the market symbol) is in hash bucket ``(b, n)``."""
+    src = _cache_sql(data_dir)
+    where = ""
+    if bucket is not None:
+        b, n = bucket
+        where = (
+            f"WHERE condition_id IN (SELECT condition_id FROM {src} "
+            f"WHERE outcome = 0 AND hash(token_id) % {int(n)} = {int(b)})"
+        )
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {name} AS SELECT * FROM {src} {where}")
 
 
 def stage_markets(
@@ -100,36 +133,26 @@ def stage_markets(
     cats: CategoryMap,
     bucket: tuple[int, int] | None = None,
 ) -> int:
-    """Append Polymarket markets from the on-chain tables to the ``m_raw`` stage; returns the
-    number of markets staged (0 when there is no on-chain data)."""
+    """Append Polymarket markets from the on-chain tables to the ``m_raw`` stage (all, or the
+    markets in hash bucket ``(b, n)`` of their symbol); returns the number staged."""
     cond_files = interim_files(data_dir, "oc_conditions")
     if not cond_files:
-        con.execute(
-            "CREATE OR REPLACE TEMP TABLE oc_tmap (token_id VARCHAR, "
-            "condition_id VARCHAR, outcome TINYINT)"
-        )
+        con.execute(f"CREATE OR REPLACE TEMP TABLE oc_tmap AS SELECT * FROM {TMAP_EMPTY}")
         return 0
+    cond_sql = _files_sql(cond_files)
+    update_token_cache(con, data_dir, cond_sql)
+    load_token_map(con, data_dir, bucket)
     con.execute(
         f"""
         CREATE OR REPLACE TEMP TABLE oc_cond AS
         SELECT condition_id, arg_min(oracle, ts) AS oracle,
                arg_min(question_id, ts) AS question_id, arg_min(slots, ts) AS slots,
                min(ts) AS ts
-        FROM {_files_sql(cond_files)} GROUP BY condition_id
+        FROM {cond_sql}
+        WHERE condition_id IN (SELECT condition_id FROM oc_tmap)
+        GROUP BY condition_id
         """
     )
-    cached_token_map(con, data_dir)
-    if bucket is not None:
-        b, n = bucket
-        # Keep the conditions whose market symbol (the outcome-0 token) is in this bucket.
-        con.execute(
-            f"""
-            CREATE OR REPLACE TEMP TABLE oc_cond AS
-            SELECT c.* FROM oc_cond c
-            JOIN oc_tmap y ON y.condition_id = c.condition_id AND y.outcome = 0
-            WHERE hash(y.token_id) % {int(n)} = {int(b)}
-            """
-        )
     q_files = interim_files(data_dir, "oc_questions")
     r_files = interim_files(data_dir, "oc_resolutions")
     q_src = (
@@ -215,7 +238,7 @@ def stage_markets(
                 FROM {_files_sql(tok_files)} GROUP BY condition_id
             ), der AS (
                 SELECT condition_id, min(token_id) AS lo, max(token_id) AS hi
-                FROM oc_tmap GROUP BY condition_id
+                FROM {_cache_sql(data_dir)} GROUP BY condition_id
             )
             SELECT count(*), count(*) FILTER (WHERE reg.lo <> der.lo OR reg.hi <> der.hi)
             FROM reg JOIN der USING (condition_id)
@@ -242,25 +265,18 @@ def check_tokens(tmap: pl.DataFrame, registered: pl.DataFrame) -> tuple[int, int
 
 
 def ensure_token_map(con: duckdb.DuckDBPyConnection, data_dir: Path) -> None:
-    """Make sure ``oc_tmap`` exists (a resumed build reloads it from the cache)."""
+    """Make sure ``oc_tmap_full`` (every token in the cache) exists for the trades steps."""
     has = con.execute(
-        "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'oc_tmap'"
+        "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'oc_tmap_full'"
     ).fetchone()
-    if has and has[0]:
-        return
-    cache = Path(data_dir) / "processed" / "oc_token_map.parquet"
-    if cache.exists():
-        path = str(cache).replace("'", "''")
-        con.execute(f"CREATE TEMP TABLE oc_tmap AS SELECT * FROM read_parquet('{path}')")
-    else:
-        con.execute(
-            "CREATE TEMP TABLE oc_tmap (token_id VARCHAR, condition_id VARCHAR, outcome TINYINT)"
-        )
+    if not (has and has[0]):
+        load_token_map(con, data_dir, None, name="oc_tmap_full")
 
 
 def insert_trades_sql(fills_sql: str) -> str:
     """SQL inserting on-chain fills (``fills_sql`` selects ``oc_fills`` rows) as YES trades,
-    using the ``oc_tmap`` token map; a fill already in ``trades`` is not inserted twice."""
+    using the ``oc_tmap_full`` token map; a fill already in ``trades`` is not inserted
+    twice."""
     return f"""
         INSERT INTO trades
         SELECT f.ts, f.ingested_at, 'polymarket', y.token_id, f.trade_id,
@@ -272,8 +288,8 @@ def insert_trades_sql(fills_sql: str) -> str:
             SELECT *, row_number() OVER (PARTITION BY trade_id ORDER BY ingested_at) AS rn
             FROM ({fills_sql})
         ) f
-        JOIN oc_tmap m ON f.token_id = m.token_id
-        JOIN oc_tmap y ON y.condition_id = m.condition_id AND y.outcome = 0
+        JOIN oc_tmap_full m ON f.token_id = m.token_id
+        JOIN oc_tmap_full y ON y.condition_id = m.condition_id AND y.outcome = 0
         WHERE f.rn = 1
           AND NOT EXISTS (
               SELECT 1 FROM trades t WHERE t.venue = 'polymarket' AND t.trade_id = f.trade_id
@@ -281,11 +297,7 @@ def insert_trades_sql(fills_sql: str) -> str:
         """
 
 
-def insert_trades(con: duckdb.DuckDBPyConnection, fills_sql: str) -> None:
+def insert_trades(con: duckdb.DuckDBPyConnection, fills_sql: str, data_dir: Path) -> None:
     """Insert on-chain fills as YES trades (see :func:`insert_trades_sql`)."""
-    has = con.execute(
-        "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'oc_tmap'"
-    ).fetchone()
-    if not has or not has[0]:
-        return
+    ensure_token_map(con, data_dir)
     con.execute(insert_trades_sql(fills_sql))
