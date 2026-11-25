@@ -564,24 +564,30 @@ def build(
     watch = guard.watch(con) if guard is not None else contextlib.nullcontext()
     complete = False
     try:
-        with watch:
-            try:
-                for name, actions in plan:
-                    runner(name, *actions)
-                complete = True
-            except _Budget:
-                pass
-            except duckdb.Error as e:
-                if guard is not None and guard.reason:
-                    raise BuildStopped(guard.reason) from e
-                if isinstance(e, duckdb.IOException):
-                    raise BuildStopped(f"disk_error: {e}") from e
-                raise
-            except OSError as e:
+        try:
+            with watch:
+                try:
+                    for name, actions in plan:
+                        runner(name, *actions)
+                    complete = True
+                except _Budget:
+                    pass
+                if not complete:
+                    # Inside the watch: the checkpoint after a step writes too (the write cap).
+                    con.execute("CHECKPOINT")
+        except duckdb.Error as e:
+            if guard is not None and guard.reason:
+                raise BuildStopped(guard.reason) from e
+            if "Too many open files" in str(e):
+                # The process file limit, not the disk (cron's soft limit is 1024).
+                raise BuildStopped(f"fd_limit: {e}") from e
+            if isinstance(e, duckdb.IOException):
                 raise BuildStopped(f"disk_error: {e}") from e
+            raise
+        except OSError as e:
+            raise BuildStopped(f"disk_error: {e}") from e
         left = sum(1 for name, _ in plan if not runner.done(name))
         if not complete:
-            con.execute("CHECKPOINT")
             return BuildResult(
                 path=tmp, rows={}, complete=False, steps_run=tuple(runner.run), steps_left=left
             )
