@@ -20,6 +20,8 @@ export OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 MKL_NUM_THREADS=8 NUMEXPR_NUM_TH
 export NUMBA_NUM_THREADS=8 POLARS_MAX_THREADS=8
 export PMR_DUCKDB_MEMORY=8GB PMR_DUCKDB_TEMP_MAX=1GB
 ts() { date -u +%FT%TZ; }
+# A trades step reads thousands of interim Parquet parts; cron's soft open-file limit is 1024.
+ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 mkdir -p "$DATA/logs"
 [ -e "$DONE" ] && exit 0
 if [ -e "$STOP" ]; then

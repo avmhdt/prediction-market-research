@@ -60,3 +60,8 @@ def test_watch_interrupts_and_raise_if_stopped(monkeypatch: pytest.MonkeyPatch) 
     assert gd.reason is not None and gd.reason.startswith("memory")
     with pytest.raises(g.BuildStopped):
         gd.raise_if_stopped()
+
+
+def test_fd_limit_is_sticky_and_not_a_disk_error() -> None:
+    e = g.BuildStopped("fd_limit: IO Error: Cannot open file x: Too many open files")
+    assert e.sticky and not e.reason.startswith("disk_error")

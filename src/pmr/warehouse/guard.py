@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Protocol
 
 # Reasons after which later runs must not start until a person clears the stop file.
-STICKY = ("disk_error", "write_cap")
+STICKY = ("disk_error", "write_cap", "fd_limit")
 
 
 class BuildStopped(Exception):
