@@ -423,13 +423,14 @@ def _plan(data_dir: Path, cats: CategoryMap) -> list[tuple[str, tuple[Action, ..
             steps.append(
                 (
                     f"trades:{b}/{n}",
+                    # Dedup the bucket first, then map only the markets its trades need (a
+                    # missing symbol or market id): maps over all 25M current markets did not
+                    # fit the memory limit next to the window.
                     (
                         f"""
-                        INSERT INTO trades
-                        SELECT t.ts_exchange, t.ts_recv, t.venue, coalesce(t.symbol, m.symbol),
-                               t.trade_id, t.price, t.qty, t.side,
-                               coalesce(nullif(t.market_id, ''), ms.market_id, t.symbol),
-                               t.source, t.notional
+                        CREATE OR REPLACE TEMP TABLE _tb AS
+                        SELECT ts_exchange, ts_recv, venue, symbol, trade_id, price, qty, side,
+                               market_id, source, notional
                         FROM (
                             SELECT *, row_number() OVER (
                                 PARTITION BY venue, trade_id
@@ -438,17 +439,44 @@ def _plan(data_dir: Path, cats: CategoryMap) -> list[tuple[str, tuple[Action, ..
                             FROM read_parquet({_parquet_list(files)}, hive_partitioning = false)
                             WHERE ts_exchange IS NOT NULL AND price BETWEEN 0 AND 1
                               AND {_bucket("trade_id", b, n)}
-                        ) t
-                        LEFT JOIN (
-                            SELECT venue, market_id, min(symbol) AS symbol
-                            FROM markets WHERE valid_to IS NULL GROUP BY venue, market_id
-                        ) m ON t.venue = m.venue AND t.market_id = m.market_id
-                        LEFT JOIN (
-                            SELECT venue, symbol, min(market_id) AS market_id
-                            FROM markets WHERE valid_to IS NULL GROUP BY venue, symbol
-                        ) ms ON t.venue = ms.venue AND t.symbol = ms.symbol
-                        WHERE t.rn = 1
+                        )
+                        WHERE rn = 1
                         """,
+                        """
+                        CREATE OR REPLACE TEMP TABLE _tm AS
+                        SELECT venue, market_id, min(symbol) AS symbol
+                        FROM markets mk
+                        WHERE valid_to IS NULL AND EXISTS (
+                            SELECT 1 FROM _tb t
+                            WHERE t.symbol IS NULL
+                              AND t.venue = mk.venue AND t.market_id = mk.market_id
+                        )
+                        GROUP BY venue, market_id
+                        """,
+                        """
+                        CREATE OR REPLACE TEMP TABLE _ts AS
+                        SELECT venue, symbol, min(market_id) AS market_id
+                        FROM markets mk
+                        WHERE valid_to IS NULL AND EXISTS (
+                            SELECT 1 FROM _tb t
+                            WHERE (t.market_id IS NULL OR t.market_id = '')
+                              AND t.venue = mk.venue AND t.symbol = mk.symbol
+                        )
+                        GROUP BY venue, symbol
+                        """,
+                        """
+                        INSERT INTO trades
+                        SELECT t.ts_exchange, t.ts_recv, t.venue, coalesce(t.symbol, m.symbol),
+                               t.trade_id, t.price, t.qty, t.side,
+                               coalesce(nullif(t.market_id, ''), ms.market_id, t.symbol),
+                               t.source, t.notional
+                        FROM _tb t
+                        LEFT JOIN _tm m ON t.venue = m.venue AND t.market_id = m.market_id
+                        LEFT JOIN _ts ms ON t.venue = ms.venue AND t.symbol = ms.symbol
+                        """,
+                        "DROP TABLE _tb",
+                        "DROP TABLE _tm",
+                        "DROP TABLE _ts",
                     ),
                 )
             )
