@@ -50,3 +50,4 @@ SPEC.html
 .coverage.*
 coverage.xml
 htmlcov/
+.pytest_tmp/

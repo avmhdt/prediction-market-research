@@ -133,6 +133,7 @@ class KalshiVenue(_Strict):
     base_url: str
     rate_limit_rps: float = Field(gt=0)
     settlement_lag_hours: float = Field(ge=0)
+    storage_allowed: bool = False  # owner ruling on Kalshi's data terms (docs/venue_notes.md)
 
 
 class PolymarketVenue(_Strict):

@@ -1,0 +1,5 @@
+# One gitleaks finding ignored by owner ruling of 2026-11-20 ("Ignore that one finding").
+# generic-api-key at src/pmr/normalize/polymarket_onchain.py:34 (commit 48163da) is
+# "token_registered": the public keccak-256 topic of the exchange's TokenRegistered event,
+# published in Polymarket's contract code. Not a secret. Every other rule stays as it is.
+48163dae8db89eaa65a6f08b0b3683b3e25a3f6c:src/pmr/normalize/polymarket_onchain.py:generic-api-key:34

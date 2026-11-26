@@ -23,7 +23,7 @@ import httpx
 import structlog
 
 from pmr.http import kalshi_auth
-from pmr.http.guard import check_request
+from pmr.http.guard import check_jsonrpc, check_request
 from pmr.http.ratelimit import RateLimiterRegistry
 from pmr.settings import HttpConfig, PmrConfig, Settings, Venue
 
@@ -143,6 +143,11 @@ class HttpClient:
             follow_redirects=False,
         )
 
+    def allow_host(self, host: str) -> None:
+        """Add a read-only data host (for example a configured subgraph) to the guard."""
+        if host and host not in self._extra_hosts:
+            self._extra_hosts = (*self._extra_hosts, host)
+
     async def __aenter__(self) -> HttpClient:
         return self
 
@@ -250,6 +255,90 @@ class HttpClient:
         status = last_exc.status if isinstance(last_exc, HttpError) else None
         raise HttpError(
             f"giving up on {host}{urlsplit(url).path} after {self.cfg.max_attempts} attempts",
+            status=status,
+            url=url,
+        ) from last_exc
+
+    async def rpc(self, url: str, method: str, params: list[Any]) -> FetchResult:
+        """One read-only JSON-RPC call (guarded by :func:`check_jsonrpc`), with retries.
+
+        HTTP 429/5xx, timeouts and JSON-RPC rate-limit errors are retried with back-off; any
+        other JSON-RPC error is returned in ``data["error"]`` for the caller to handle (for
+        example a result-cap error asking for a smaller block range).
+        """
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        check_jsonrpc(url, payload)
+        host = (urlsplit(url).hostname or "").lower()
+        limiter = self.limits.for_host(host)
+        last_exc: Exception | None = None
+        for attempt in range(1, self.cfg.max_attempts + 1):
+            await limiter.acquire()
+            t0 = time.perf_counter()
+            try:
+                resp = await self._client.post(
+                    url, json=payload, headers={"Content-Type": "application/json"}
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_exc = exc
+                log.warning(
+                    "rpc_transport_error",
+                    url=url,
+                    method=method,
+                    attempt=attempt,
+                    error=type(exc).__name__,
+                )
+                if attempt < self.cfg.max_attempts:
+                    await self._sleep(backoff_delay(attempt, self.cfg, self._rng))
+                continue
+            data: Any = None
+            try:
+                data = resp.json()
+            except ValueError:
+                data = None
+            err = data.get("error") if isinstance(data, dict) else None
+            rate_limited = isinstance(err, dict) and (
+                err.get("code") in (-32005, -32029, 429)
+                or "rate" in str(err.get("message", "")).lower()
+            )
+            if resp.status_code in RETRY_STATUS or rate_limited:
+                if resp.status_code == 429 or rate_limited:
+                    limiter.penalize()
+                last_exc = HttpError(
+                    f"RPC {resp.status_code} {err}", status=resp.status_code, url=url
+                )
+                log.warning(
+                    "rpc_retryable",
+                    url=url,
+                    method=method,
+                    status=resp.status_code,
+                    attempt=attempt,
+                    error=str(err)[:200] if err else None,
+                )
+                if attempt < self.cfg.max_attempts:
+                    delay = backoff_delay(attempt, self.cfg, self._rng)
+                    ra = parse_retry_after(resp.headers.get("Retry-After"))
+                    if ra is not None:
+                        delay = max(delay, min(ra, self.cfg.backoff_max_s))
+                    await self._sleep(max(delay, 2.0))
+                continue
+            if resp.status_code >= 400 or not isinstance(data, dict):
+                raise HttpError(
+                    f"RPC HTTP {resp.status_code} from {host}", status=resp.status_code, url=url
+                )
+            return FetchResult(
+                url=url,
+                params={"method": method, "params": params},
+                status=resp.status_code,
+                ts_recv_ns=time.time_ns(),
+                elapsed_s=time.perf_counter() - t0,
+                attempts=attempt,
+                date_header=resp.headers.get("Date"),
+                data=data,
+                headers=redact_headers(dict(resp.headers)),
+            )
+        status = last_exc.status if isinstance(last_exc, HttpError) else None
+        raise HttpError(
+            f"giving up on RPC {method} after {self.cfg.max_attempts} attempts",
             status=status,
             url=url,
         ) from last_exc
