@@ -67,8 +67,10 @@ CREATE TABLE trades (
     side TINYINT NOT NULL CHECK (side IN (-1, 0, 1)),
     market_id VARCHAR NOT NULL,
     source VARCHAR NOT NULL,
-    notional DOUBLE NOT NULL,
-    PRIMARY KEY (venue, trade_id)
+    notional DOUBLE NOT NULL
+    -- Unique on (venue, trade_id) by construction: the build deduplicates each hash bucket
+    -- of trade_id. No PRIMARY KEY index: on about 700M rows it needs tens of GB of memory and
+    -- DuckDB rewrites it at every checkpoint (2026-11-26).
 );
 
 CREATE TABLE price_history (

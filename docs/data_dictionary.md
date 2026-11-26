@@ -67,7 +67,7 @@ is a series.
 
 ## trades
 
-Unique on `(venue, trade_id)` (DQ-08). Canonical fields plus additions.
+Unique on `(venue, trade_id)` (DQ-08), guaranteed by the build's deduplication (each hash bucket of `trade_id` is deduplicated, and buckets are disjoint) rather than by a primary-key index, which does not fit in memory at this size. Canonical fields plus additions.
 
 | Column | Type | Meaning |
 |---|---|---|

@@ -603,6 +603,9 @@ def build(
                 if not complete:
                     # Inside the watch: the checkpoint after a step writes too (the write cap).
                     con.execute("CHECKPOINT")
+            if guard is not None and guard.reason:
+                # Set while a step committed (a COMMIT or CHECKPOINT cannot be interrupted).
+                raise BuildStopped(guard.reason)
         except duckdb.Error as e:
             if guard is not None and guard.reason:
                 raise BuildStopped(guard.reason) from e

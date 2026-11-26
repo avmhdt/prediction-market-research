@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import duckdb
 import httpx
 import pytest
 import respx
@@ -123,6 +124,10 @@ async def test_runners_build_and_inventory(
         runs += 1
         assert runs < 40
     assert checksums(wh2) == first
+    con = duckdb.connect(str(wh2), read_only=True)
+    dup = con.execute("SELECT count(*) - count(DISTINCT (venue, trade_id)) FROM trades").fetchone()
+    con.close()
+    assert dup == (0,)
     # Hash buckets change only how the work is split, not the result.
     monkeypatch.setattr(build_mod, "BUCKETS", dict.fromkeys(build_mod.BUCKETS, 1))
     wh3 = tmp_path / "w3.duckdb"
