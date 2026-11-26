@@ -36,6 +36,27 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_logging() -> object:
+    """A CLI test configures structlog to print to its captured stream; reset it after every
+    test so later tests never log to a closed file."""
+    import structlog
+
+    yield
+    structlog.reset_defaults()
+
+
+@pytest.fixture(autouse=True)
+def _quiet_build_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The warehouse guard sees plenty of memory, no disk errors and no write counter, so a
+    test never depends on the machine it runs on (tests that check a reason patch these)."""
+    from pmr.warehouse import guard
+
+    monkeypatch.setattr(guard, "mem_available_gb", lambda: 1000.0)
+    monkeypatch.setattr(guard, "ext4_errors", dict)
+    monkeypatch.setattr(guard, "written_bytes", lambda _path=None: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Any real outbound connection fails unless the test is marked ``network``."""
     if request.node.get_closest_marker("network"):

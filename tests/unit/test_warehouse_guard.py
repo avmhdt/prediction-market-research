@@ -65,3 +65,22 @@ def test_watch_interrupts_and_raise_if_stopped(monkeypatch: pytest.MonkeyPatch) 
 def test_fd_limit_is_sticky_and_not_a_disk_error() -> None:
     e = g.BuildStopped("fd_limit: IO Error: Cannot open file x: Too many open files")
     assert e.sticky and not e.reason.startswith("disk_error")
+
+
+def test_reason_set_during_commit_still_stops(tmp_path: Path) -> None:
+    """A reason set while a step commits (a COMMIT cannot be interrupted) stops the run after
+    that step: the step stays committed and the build raises."""
+    from pmr.normalize import categories
+    from pmr.warehouse.build import build
+    from tests.conftest import REPO
+
+    class Late(g.Guard):
+        def raise_if_stopped(self) -> None:  # the reason appears only after the step began
+            return None
+
+    cats = categories.load(str(REPO / "config" / "categories.yaml"))
+    gd = Late(interval_s=3600)
+    gd.reason = "write_cap: 5.0 GB written > 4 GB"
+    with pytest.raises(g.BuildStopped, match="write_cap"):
+        build(tmp_path, tmp_path / "w.duckdb", cats, threads=1, max_steps=1, guard=gd)
+    assert (tmp_path / "w.duckdb.tmp").exists()
